@@ -1,0 +1,4 @@
+discord
+ruamel.yaml
+pydantic
+asyncpg
