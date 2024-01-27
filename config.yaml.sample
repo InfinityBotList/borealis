@@ -1,1 +1,13 @@
 token:
+postgres_url:
+pinned_servers:
+    - STAFF_SERVER
+needed_bots:
+    # Arcadia
+    - name: Arcadia
+      id: 870728078228324382
+      invite: https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands&guild_id={guild_id}
+    # Popplio
+    - name: Popplio
+      id: 815553000470478850
+      invite: https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands&guild_id={guild_id}
