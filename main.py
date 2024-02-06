@@ -6,6 +6,7 @@ import logging
 import asyncpg
 import asyncio
 from kittycat.perms import get_user_staff_perms
+from kittycat.kittycat import has_perm
 import secrets
 
 logging.basicConfig(level=logging.INFO)
@@ -47,17 +48,23 @@ async def on_ready():
 
     for guild in bot.guilds:
         if guild.id in bot.config.pinned_servers:
-            continue 
+            continue
+
+        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(guild.id))
+
+        if count > 0:
+            print(f"Found cache server: {guild.name} ({guild.id})")
+            continue
 
         print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
 
         try:
             if guild.owner_id == bot.user.id:
                 print(f"ALERT: Guild owner is bot, deleting guild")
-                await guild.delete()
+                #await guild.delete()
             else:
                 print(f"ALERT: Guild owner is not bot, leaving guild")
-                await guild.leave()
+                #await guild.leave()
         except discord.HTTPException:
             print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
 
@@ -94,6 +101,12 @@ async def make_cache_server(
     is_cache_server: bool | None = commands.parameter(default=False, description="Whether the server should be setup as a cache server or not")
 ):
     """Creates a cache server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.make_cache_servers"):
+        return await ctx.send("You need ``borealis.make_cache_servers`` permission to use this command!")
+
     msg = ""
 
     if not is_cache_server:
@@ -113,17 +126,38 @@ async def make_cache_server(
     else:
         done_bots = []
         needed_bots = list(map(lambda b: b.id, bot.config.needed_bots))
+        needed_bots_members = []
         for b in bot.config.needed_bots:
             member = ctx.guild.get_member(b.id)
 
             if member:
                 done_bots.append(b.name)
+                needed_bots_members.append(member)
                 continue
             
         not_yet_added = list(filter(lambda b: b.name not in done_bots, bot.config.needed_bots))
-        if set(needed_bots) == set(done_bots):
-            # Do some setup here
-            await ctx.send("WIP/Not implemented")
+        if not not_yet_added:
+            if not ctx.me.guild_permissions.administrator:
+                return await ctx.send("Please give Borealis administrator in order to continue")
+
+            # Create the 'Needed Bots' role
+            needed_bots_role = await ctx.guild.create_role(name="System Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+            
+            bots_role = await ctx.guild.create_role(name="Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+
+            hs_role = await ctx.guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+
+            await ctx.me.add_roles(needed_bots_role, bots_role)
+
+            for m in needed_bots_members:
+                await m.add_roles(needed_bots_role, bots_role)
+
+            logs_category = await ctx.guild.create_category('Logging')
+
+            logs_channel = await logs_category.create_text_channel('system-logs')
+
+            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role) VALUES ($1, $2, $3, $4, $5)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id))
+            await ctx.send("Cache server added to database")
         else:
             msg = "The following bots have not been added to the server yet:\n"
             
