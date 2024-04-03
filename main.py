@@ -9,6 +9,8 @@ from kittycat.perms import get_user_staff_perms
 from kittycat.kittycat import has_perm
 import secrets
 
+MAX_PER_CACHE_SERVER = 40
+
 logging.basicConfig(level=logging.INFO)
 
 class NeededBots(BaseModel):
@@ -42,6 +44,7 @@ intents = discord.Intents.all()
 
 bot = BorealisBot(config)
 
+# On ready handler
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id}), scanning servers")
@@ -96,6 +99,67 @@ async def kittycat(
         await ctx.send(f"**Positions:** {[f'{usp.id} [{usp.index}]' for usp in usp.user_positions]} with overrides: {usp.perm_overrides}\n\n**Resolved**: ``{' | '.join(resolved)}``")
 
 @bot.hybrid_command()
+async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
+    """Selects 50 bots for a cache server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.csbots"):
+        return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
+
+    # Check if a cache server
+    is_cache_server = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+    if not is_cache_server:
+        return await ctx.send("This server is not a cache server")
+
+    # Check currently selected too
+    selected = await bot.pool.fetch("SELECT bot_id, created_at, added from cache_server_bots WHERE guild_id = $1 ORDER BY created_at DESC", str(ctx.guild.id))
+
+    if len(selected) < MAX_PER_CACHE_SERVER:
+        # Try selecting other bots and adding it to db
+        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
+
+        for b in not_yet_selected:
+            if len(selected) >= MAX_PER_CACHE_SERVER:
+                break
+
+            created_at = await bot.pool.fetchval("INSERT INTO cache_server_bots (guild_id, bot_id) VALUES ($1, $2) RETURNING created_at", str(ctx.guild.id), b["bot_id"])
+            selected.append({"bot_id": b["bot_id"], "created_at": created_at, "added": 0})
+    
+    elif len(selected) > MAX_PER_CACHE_SERVER:
+        # Remove 10 bots
+        to_remove = selected[:10]
+        await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = ANY($2)", str(ctx.guild.id), [b["bot_id"] for b in to_remove])
+        selected = selected[10:]
+
+    msg = "Selected bots:\n"
+
+    showing = 0
+    for b in selected:
+        if only_show_not_on_server:
+            # Check if in server
+            in_server = ctx.guild.get_member(b["bot_id"])
+
+            if in_server:
+                continue
+        
+        showing += 1
+
+        name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
+        msg += f"\n- {name} [{b['bot_id']}]: https://discord.com/api/oauth2/authorize?client_id={b['bot_id']}&guild_id={ctx.guild.id}&scope=bot ({b['added']}, {b['created_at']})"
+
+        if len(msg) >= 1500:
+            await ctx.send(msg)
+            msg = ""
+
+    if msg:
+        await ctx.send(msg)
+    
+    await ctx.send(f"Total: {len(selected)} bots\nShowing: {showing} bots")
+
+
+@bot.hybrid_command()
 async def make_cache_server(
     ctx: commands.Context, 
     is_cache_server: bool | None = commands.parameter(default=False, description="Whether the server should be setup as a cache server or not")
@@ -106,6 +170,11 @@ async def make_cache_server(
 
     if not has_perm(resolved, "borealis.make_cache_servers"):
         return await ctx.send("You need ``borealis.make_cache_servers`` permission to use this command!")
+
+    existing = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+    if existing:
+        return await ctx.send("This server is already a cache server")
 
     msg = ""
 
@@ -125,8 +194,7 @@ async def make_cache_server(
         return await ctx.send(msg)
     else:
         done_bots = []
-        needed_bots = list(map(lambda b: b.id, bot.config.needed_bots))
-        needed_bots_members = []
+        needed_bots_members: list[discord.Member] = []
         for b in bot.config.needed_bots:
             member = ctx.guild.get_member(b.id)
 
