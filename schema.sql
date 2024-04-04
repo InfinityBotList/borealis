@@ -3,6 +3,8 @@ CREATE TABLE public.cache_servers (
     guild_id text NOT NULL,
     bots_role text NOT NULL,
     system_bots_role text NOT NULL,
+    welcome_channel text not null,
+    invite_code text NOT NULL,
     logs_channel text NOT NULL,
     staff_role text NOT NULL
 );

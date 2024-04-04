@@ -10,6 +10,7 @@ from kittycat.kittycat import has_perm
 import secrets
 import traceback
 import sys
+import os
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -115,9 +116,48 @@ async def handle_member(member: discord.Member, cache_server_info = None):
 async def on_member_join(member: discord.Member):
     await handle_member(member)
 
-# Task to validate all members every 5 minutes
+@tasks.loop(minutes=15)
+async def ensure_invites():
+    """Task to ensure and correct guild invites for all servers"""
+    for guild in bot.guilds:
+        cache_server_info = await bot.pool.fetchrow("SELECT welcome_channel, logs_channel, invite_code from cache_servers WHERE guild_id = $1", str(guild.id))
+
+        if not cache_server_info:
+            continue
+
+        print(f"Validating invites for {guild.name} ({guild.id})")
+        invites = await guild.invites()
+
+        have_invite = False
+        for invite in invites:
+            if invite.code == cache_server_info["invite_code"]:
+                have_invite = True
+            else:
+                if not invite.expires_at:
+                    await invite.delete(reason="Unlimited invites are not allowed on cache servers")
+
+        if not have_invite:
+            logs_channel = guild.get_channel(int(cache_server_info["logs_channel"]))
+
+            if not logs_channel:
+                print(f"Failed to find logs channel for {guild.name} ({guild.id})")
+                continue
+
+            welcome_channel = guild.get_channel(int(cache_server_info["welcome_channel"]))
+
+            if not welcome_channel:
+                print(f"Failed to find welcome channel for {guild.name} ({guild.id})")
+                await logs_channel.send("Failed to find welcome channel, creating new one")
+                welcome_channel = await guild.create_text_channel("welcome", reason="Welcome channel")
+                await bot.pool.execute("UPDATE cache_servers SET welcome_channel = $1 WHERE guild_id = $2", str(welcome_channel.id), str(guild.id))
+
+            await logs_channel.send("Cache server invite has expired, creating new one")
+            invite = await welcome_channel.create_invite(reason="Cache server invite", unique=True, max_uses=0, max_age=0)
+            await bot.pool.execute("UPDATE cache_servers SET invite_code = $1 WHERE guild_id = $2", invite.code, str(guild.id))
+
 @tasks.loop(minutes=5) 
 async def validate_members():
+    """Task to validate all members every 5 minutes"""
     for guild in bot.guilds:
         cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(guild.id))
 
@@ -127,15 +167,16 @@ async def validate_members():
 
             print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
 
-            try:
-                if guild.owner_id == bot.user.id:
-                    print(f"ALERT: Guild owner is bot, deleting guild")
-                    await guild.delete()
-                else:
-                    print(f"ALERT: Guild owner is not bot, leaving guild")
-                    await guild.leave()
-            except discord.HTTPException:
-                print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
+            if os.environ.get("DELETE_GUILDS", "false").lower() == "true":
+                try:
+                    if guild.owner_id == bot.user.id:
+                        print(f"ALERT: Guild owner is bot, deleting guild")
+                        await guild.delete()
+                    else:
+                        print(f"ALERT: Guild owner is not bot, leaving guild")
+                        await guild.leave()
+                except discord.HTTPException:
+                    print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
             
             continue
 
@@ -297,11 +338,13 @@ async def make_cache_server(
             for m in needed_bots_members:
                 await m.add_roles(needed_bots_role, bots_role)
 
+            welcome_category = await ctx.guild.create_category("Welcome")
+            welcome_channel = await welcome_category.create_text_channel("welcome")
+            invite = await welcome_channel.create_invite(reason="Cache server invite", unique=True, max_uses=0, max_age=0)
             logs_category = await ctx.guild.create_category('Logging')
-
             logs_channel = await logs_category.create_text_channel('system-logs')
-
-            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role) VALUES ($1, $2, $3, $4, $5)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id))
+            
+            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code) VALUES ($1, $2, $3, $4, $5, $6, $7)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code)
             await ctx.send("Cache server added to database")
         else:
             msg = "The following bots have not been added to the server yet:\n"
