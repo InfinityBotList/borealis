@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from pydantic import BaseModel
 from ruamel.yaml import YAML
 import logging
@@ -49,31 +49,10 @@ bot = BorealisBot(config)
 # On ready handler
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id}), scanning servers")
+    print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
+    validate_members.start()
 
-    for guild in bot.guilds:
-        if guild.id in bot.config.pinned_servers:
-            continue
-
-        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(guild.id))
-
-        if count > 0:
-            print(f"Found cache server: {guild.name} ({guild.id})")
-            continue
-
-        print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
-
-        try:
-            if guild.owner_id == bot.user.id:
-                print(f"ALERT: Guild owner is bot, deleting guild")
-                await guild.delete()
-            else:
-                print(f"ALERT: Guild owner is not bot, leaving guild")
-                await guild.leave()
-        except discord.HTTPException:
-            print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
-
-async def handle_member(member: discord.Member):
+async def handle_member(member: discord.Member, cache_server_info = None):
     """
     Handles a member, including adding them to any needed roles
     
@@ -83,8 +62,11 @@ async def handle_member(member: discord.Member):
     if not member.bot:
         return
 
-    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
+    # If cache_server_info is None, check if present
+    if not cache_server_info:
+        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
 
+    # If still not found...
     if not cache_server_info:
         # Ignore non-cache servers
         return 
@@ -103,7 +85,10 @@ async def handle_member(member: discord.Member):
                 await logs_channel.send(f"Failed to find needed roles for needed bot {member.name} ({member.id}). The Needed Bots role currently configured is {cache_server_info['system_bots_role']} and the Bots role is {cache_server_info['bots_role']}. Please verify these roles exist <@&{cache_server_info['staff_role']}>")
             return
 
-        return await member.add_roles(needed_bots_role, bots_role)
+        # Check if said bot has the needed roles
+        if needed_bots_role not in member.roles or bots_role not in member.roles:
+            # Add the roles
+            return await member.add_roles(needed_bots_role, bots_role)
     
     # Check if this bot has been selected for this cache server
     count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
@@ -123,11 +108,44 @@ async def handle_member(member: discord.Member):
             await logs_channel.send(f"Failed to find Bots role for bot {member.name} ({member.id}). The Bots role currently configured is {cache_server_info['bots_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
         return
 
-    await member.add_roles(bots_role)
+    if bots_role not in member.roles:
+        await member.add_roles(bots_role)
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    await handle_member(member)    
+    await handle_member(member)
+
+# Task to validate all members every 5 minutes
+@tasks.loop(minutes=5) 
+async def validate_members():
+    for guild in bot.guilds:
+        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(guild.id))
+
+        if not cache_server_info:
+            if guild.id in bot.config.pinned_servers:
+                continue
+
+            print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
+
+            try:
+                if guild.owner_id == bot.user.id:
+                    print(f"ALERT: Guild owner is bot, deleting guild")
+                    await guild.delete()
+                else:
+                    print(f"ALERT: Guild owner is not bot, leaving guild")
+                    await guild.leave()
+            except discord.HTTPException:
+                print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
+            
+            continue
+
+        print(f"Validating members for {guild.name} ({guild.id})")
+        for member in guild.members:
+            if member.id == bot.user.id:
+                continue
+    
+            print(f"Validating {member.name} ({member.id}) [bot={member.bot}]")
+            await handle_member(member, cache_server_info=cache_server_info)
 
 # Error handler
 @bot.event
