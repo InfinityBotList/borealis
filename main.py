@@ -8,6 +8,8 @@ import asyncio
 from kittycat.perms import get_user_staff_perms
 from kittycat.kittycat import has_perm
 import secrets
+import traceback
+import sys
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -64,12 +66,68 @@ async def on_ready():
         try:
             if guild.owner_id == bot.user.id:
                 print(f"ALERT: Guild owner is bot, deleting guild")
-                #await guild.delete()
+                await guild.delete()
             else:
                 print(f"ALERT: Guild owner is not bot, leaving guild")
-                #await guild.leave()
+                await guild.leave()
         except discord.HTTPException:
             print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
+
+async def handle_member(member: discord.Member):
+    """
+    Handles a member, including adding them to any needed roles
+    
+    This is a seperate function to allow for better debugging using the WIP fastapi webserver
+    """
+    # Ignore non-bots
+    if not member.bot:
+        return
+
+    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
+
+    if not cache_server_info:
+        # Ignore non-cache servers
+        return 
+
+    # Check if the bot is in the needed bots list
+    if str(member.id) in [str(b.id) for b in bot.config.needed_bots]:
+        # Give Needed Bots role and Bots role
+        needed_bots_role = member.guild.get_role(int(cache_server_info["system_bots_role"]))
+        bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
+
+        if not needed_bots_role or not bots_role:
+            # Send alert to logs channel
+            logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
+
+            if logs_channel:
+                await logs_channel.send(f"Failed to find needed roles for needed bot {member.name} ({member.id}). The Needed Bots role currently configured is {cache_server_info['system_bots_role']} and the Bots role is {cache_server_info['bots_role']}. Please verify these roles exist <@&{cache_server_info['staff_role']}>")
+            return
+
+        return await member.add_roles(needed_bots_role, bots_role)
+    
+    # Check if this bot has been selected for this cache server
+    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
+
+    if not count:
+        # Not white-listed, kick it
+        return await member.kick(reason="Not white-listed for cache server")
+    
+    # Add the bot to the Bots role
+    bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
+
+    if not bots_role:
+        # Send alert to logs channel
+        logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
+
+        if logs_channel:
+            await logs_channel.send(f"Failed to find Bots role for bot {member.name} ({member.id}). The Bots role currently configured is {cache_server_info['bots_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
+        return
+
+    await member.add_roles(bots_role)
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    await handle_member(member)    
 
 # Error handler
 @bot.event
@@ -77,6 +135,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, commands.CommandNotFound):
         return
 
+    traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
     await ctx.send(f"Error: {error}")
 
 @bot.hybrid_command()
