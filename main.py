@@ -53,6 +53,7 @@ bot = BorealisBot(config)
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
     validate_members.start()
+    ensure_invites.start()
 
 async def handle_member(member: discord.Member, cache_server_info = None):
     """
