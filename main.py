@@ -11,6 +11,7 @@ import secrets
 import traceback
 import sys
 import os
+import datetime
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -119,6 +120,7 @@ async def on_member_join(member: discord.Member):
 @tasks.loop(minutes=15)
 async def ensure_invites():
     """Task to ensure and correct guild invites for all servers"""
+    print(f"Starting ensure_invites task on {datetime.datetime.now()}")
     for guild in bot.guilds:
         cache_server_info = await bot.pool.fetchrow("SELECT welcome_channel, logs_channel, invite_code from cache_servers WHERE guild_id = $1", str(guild.id))
 
@@ -158,6 +160,7 @@ async def ensure_invites():
 @tasks.loop(minutes=5) 
 async def validate_members():
     """Task to validate all members every 5 minutes"""
+    print(f"Starting validate_members task on {datetime.datetime.now()}")
     for guild in bot.guilds:
         cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(guild.id))
 
