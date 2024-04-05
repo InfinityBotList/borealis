@@ -62,8 +62,30 @@ async def handle_member(member: discord.Member, cache_server_info = None):
     
     This is a seperate function to allow for better debugging using the WIP fastapi webserver
     """
-    # Ignore non-bots
     if not member.bot:
+        try:
+            usp = await get_user_staff_perms(bot.pool, member.id)
+        except:
+            usp = None
+        
+        if usp:
+            staff_role = member.guild.get_role(int(cache_server_info["staff_role"]))
+
+            if not staff_role:
+                # Send alert to logs channel
+                logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
+
+                if logs_channel:
+                    await logs_channel.send(f"Failed to find staff role for staff member {member.name} ({member.id}). The staff role currently configured is {cache_server_info['staff_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
+                return
+
+            if len(usp.user_positions) > 0:
+                # Add staff role
+                if staff_role not in member.roles:
+                    await member.add_roles(staff_role)
+            elif staff_role in member.roles:
+                await member.remove_roles(staff_role) 
+
         return
 
     # If cache_server_info is None, check if present
@@ -93,7 +115,9 @@ async def handle_member(member: discord.Member, cache_server_info = None):
         if needed_bots_role not in member.roles or bots_role not in member.roles:
             # Add the roles
             return await member.add_roles(needed_bots_role, bots_role)
-    
+
+        return
+
     # Check if this bot has been selected for this cache server
     count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
 
@@ -101,6 +125,14 @@ async def handle_member(member: discord.Member, cache_server_info = None):
         # Not white-listed, kick it
         return await member.kick(reason="Not white-listed for cache server")
     
+    # Also, check that the bot is approved or certified
+    bot_type = await bot.pool.fetchval("SELECT type from bots WHERE bot_id = $1", str(member.id))
+
+    if bot_type and bot_type not in ["approved", "certified"]:
+        # Not approved or certified, kick it
+        await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
+        return await member.kick(reason="Not approved or certified")
+
     # Add the bot to the Bots role
     bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
 
@@ -170,9 +202,8 @@ async def validate_members():
             if guild.id in bot.config.pinned_servers:
                 continue
 
-            print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
-
             if os.environ.get("DELETE_GUILDS", "false").lower() == "true":
+                print(f"ALERT: Found unknown server {guild.name} ({guild.id}), leaving/deleting")
                 try:
                     if guild.owner_id == bot.user.id:
                         print(f"ALERT: Guild owner is bot, deleting guild")
@@ -252,7 +283,7 @@ async def csreport(ctx: commands.Context, only_file: bool = False):
         opts_str = ""
 
         for k, v in opts.items():
-            opts_str += f"\n  - {k}: {v}"
+            opts_str += f"\n- {k}: {v}"
 
         msg += f"\n- {guild.name} ({guild.id})\n{opts_str}"
 
@@ -274,7 +305,7 @@ async def csreport(ctx: commands.Context, only_file: bool = False):
         await ctx.send(file=file)
 
 @bot.hybrid_command()
-async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
+async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
     """Selects 50 bots for a cache server"""
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
@@ -293,7 +324,7 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
 
     if len(selected) < MAX_PER_CACHE_SERVER:
         # Try selecting other bots and adding it to db
-        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
+        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE (type = 'approved' OR type = 'certified') AND bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
 
         for b in not_yet_selected:
             if len(selected) >= MAX_PER_CACHE_SERVER:
@@ -314,8 +345,7 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
     for b in selected:
         if only_show_not_on_server:
             # Check if in server
-            in_server = ctx.guild.get_member(b["bot_id"])
-
+            in_server = ctx.guild.get_member(int(b["bot_id"]))
             if in_server:
                 continue
         
@@ -391,6 +421,7 @@ async def make_cache_server(
             hs_role = await ctx.guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
 
             await ctx.me.add_roles(needed_bots_role, bots_role)
+            await ctx.author.add_roles(hs_role)
 
             for m in needed_bots_members:
                 await m.add_roles(needed_bots_role, bots_role)
