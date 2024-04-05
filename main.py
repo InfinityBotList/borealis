@@ -12,6 +12,7 @@ import traceback
 import sys
 import os
 import datetime
+import io
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -221,6 +222,58 @@ async def kittycat(
         await ctx.send(f"**Positions:** {[f'{usp.id} [{usp.index}]' for usp in usp.user_positions]} with overrides: {usp.perm_overrides}\n\n**Resolved**: ``{' | '.join(resolved)}``")
 
 @bot.hybrid_command()
+async def csreport(ctx: commands.Context, only_file: bool = False):
+    """Create report on all cache servers"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cslist"):
+        return await ctx.send("You need ``borealis.cslist`` permission to use this command!")
+
+    servers = await bot.pool.fetch("SELECT guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code from cache_servers")
+
+    msg = "Cache Servers:\n"
+
+    for s in servers:
+        guild = bot.get_guild(int(s["guild_id"]))
+
+        if not guild:
+            continue
+
+        opts = {
+            "bots_role": guild.get_role(int(s["bots_role"])) or f"{s['bots_role']}, not found",
+            "system_bots_role": guild.get_role(int(s["system_bots_role"])) or f"{s['system_bots_role']}, not found",
+            "logs_channel": guild.get_channel(int(s["logs_channel"])) or f"{s['logs_channel']}, not found",
+            "staff_role": guild.get_role(int(s["staff_role"])) or f"{s['staff_role']}, not found",
+            "welcome_channel": guild.get_channel(int(s["welcome_channel"])) or f"{s['welcome_channel']}, not found",
+            "invite_code": s["invite_code"]
+        }
+
+        opts_str = ""
+
+        for k, v in opts.items():
+            opts_str += f"\n  - {k}: {v}"
+
+        msg += f"\n- {guild.name} ({guild.id})\n{opts_str}"
+
+        # Get all bots in cache server
+        bots = await bot.pool.fetch("SELECT bot_id, guild_id, created_at, added from cache_server_bots")
+
+        msg += "\n\n== Bots =="
+
+        for b in bots:
+            if b["guild_id"] == str(guild.id):
+                name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
+                msg += f"\n- {name} [{b['bot_id']}]: {b['created_at']} ({b['added']})"
+
+    if len(msg) < 1500 and not only_file:
+        await ctx.send(msg)
+    else:
+        # send as file
+        file = discord.File(filename="cache_servers.txt", fp=io.BytesIO(msg.encode("utf-8")))
+        await ctx.send(file=file)
+
+@bot.hybrid_command()
 async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
     """Selects 50 bots for a cache server"""
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
@@ -250,10 +303,10 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool):
             selected.append({"bot_id": b["bot_id"], "created_at": created_at, "added": 0})
     
     elif len(selected) > MAX_PER_CACHE_SERVER:
-        # Remove 10 bots
-        to_remove = selected[:10]
+        remove_amount = len(selected) - MAX_PER_CACHE_SERVER
+        to_remove = selected[:remove_amount]
         await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = ANY($2)", str(ctx.guild.id), [b["bot_id"] for b in to_remove])
-        selected = selected[10:]
+        selected = selected[remove_amount:]
 
     msg = "Selected bots:\n"
 
