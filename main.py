@@ -50,7 +50,6 @@ class BorealisBot(commands.AutoShardedBot):
         api.config = config
         server = uvicorn.Server(config=uvicorn.Config(api.app, workers=3, loop=loop, port=2837))
         asyncio.create_task(server.serve())
-
         await super().start(self.config.token)
 
 intents = discord.Intents.all()
@@ -63,6 +62,8 @@ async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
     validate_members.start()
     ensure_invites.start()
+    ensure_cache_servers.start()
+    await bot.tree.sync()
 
 async def handle_member(member: discord.Member, cache_server_info):
     """
@@ -156,6 +157,24 @@ async def on_member_join(member: discord.Member):
     cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
     await handle_member(member, cache_server_info=cache_server_info)
 
+_ensure_cache_server = {} # delete if fail check 3 times
+@tasks.loop(minutes=5)
+async def ensure_cache_servers():
+    print(f"Starting ensure_cache_servers task on {datetime.datetime.now()}")
+
+    # Check for guilds we are not in
+    unknown_guilds = await bot.pool.fetch("SELECT guild_id from cache_servers WHERE guild_id != ALL($1)", [str(g.id) for g in bot.guilds])
+
+    for guild in unknown_guilds:
+        print(f"ALERT: Found unknown server {guild['guild_id']}")
+
+        c = _ensure_cache_server.get(guild["guild_id"], 0)
+
+        if c > 3:
+            await bot.pool.execute("DELETE FROM cache_servers WHERE guild_id = $1", guild["guild_id"])
+
+        _ensure_cache_server[guild["guild_id"]] = c + 1
+
 @tasks.loop(minutes=15)
 async def ensure_invites():
     """Task to ensure and correct guild invites for all servers"""
@@ -201,7 +220,7 @@ async def validate_members():
     """Task to validate all members every 5 minutes"""
     print(f"Starting validate_members task on {datetime.datetime.now()}")
     for guild in bot.guilds:
-        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(guild.id))
+        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role, name from cache_servers WHERE guild_id = $1", str(guild.id))
 
         if not cache_server_info:
             if guild.id in bot.config.pinned_servers:
@@ -220,6 +239,13 @@ async def validate_members():
                     print(f"ALERT: Failed to leave/delete guild {guild.name} ({guild.id})")
             
             continue
+        else:
+            # Check name
+            if not cache_server_info["name"]:
+                await bot.pool.execute("UPDATE cache_servers SET name = $1 WHERE guild_id = $2", guild.name, str(guild.id))
+            elif cache_server_info["name"] != guild.name:
+                # Update server name
+                await guild.edit(name=cache_server_info["name"])      
 
         print(f"Validating members for {guild.name} ({guild.id})")
         for member in guild.members:
@@ -329,7 +355,7 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
 
     if len(selected) < MAX_PER_CACHE_SERVER:
         # Try selecting other bots and adding it to db
-        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE (type = 'approved' OR type = 'certified') AND bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
+        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE (type = 'approved' OR type = 'certified') AND cache_server_uninvitable IS NULL AND bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
 
         for b in not_yet_selected:
             if len(selected) >= MAX_PER_CACHE_SERVER:
@@ -369,6 +395,105 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
     
     await ctx.send(f"Total: {len(selected)} bots\nShowing: {showing} bots")
 
+@bot.hybrid_command()
+async def cs_mark_uninvitable(
+    ctx: commands.Context,
+    bot_id: int,
+    reason: str
+):
+    """Marks a bot as uninvitable in the cache server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.csbots"):
+        return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
+
+    # Check if a cache server
+    is_cache_server = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+    if not is_cache_server:
+        return await ctx.send("This server is not a cache server")
+
+    # Check if bot is in cache_server_bots
+    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(ctx.guild.id), str(bot_id))
+
+    if not count:
+        return await ctx.send("Bot is not in cache server")
+
+    await bot.pool.execute("UPDATE bots SET cache_server_uninvitable = $1 WHERE bot_id = $2", reason, str(bot_id))
+    await ctx.send("Bot marked as uninvitable")
+
+@bot.hybrid_command()
+async def cs_unmark_uninvitable(
+    ctx: commands.Context,
+    bot_id: int
+):
+    """Unmarks a bot as uninvitable"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.csbots"):
+        return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
+
+    # Check if a cache server
+    is_cache_server = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+    if not is_cache_server:
+        return await ctx.send("This server is not a cache server")
+
+    # Check if bot is in cache_server_bots
+    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(ctx.guild.id), str(bot_id))
+
+    if not count:
+        return await ctx.send("Bot is not in cache server")
+
+    await bot.pool.execute("UPDATE bots SET cache_server_uninvitable = NULL WHERE bot_id = $1", str(bot_id))
+    await ctx.send("Bot unmarked as uninvitable")
+
+@bot.hybrid_command()
+async def cs_list_uninvitable(
+    ctx: commands.Context,
+    only_show_for_guild: bool = False
+):
+    """Shows a list of all bots marked as uninvitable with their reason"""
+    if only_show_for_guild:
+        is_cache_server = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+        if not is_cache_server:
+            return await ctx.send("This server is not a cache server")
+
+        bots = await bot.pool.fetch("SELECT bot_id, cache_server_uninvitable from bots WHERE guild_id = $1 AND cache_server_uninvitable IS NOT NULL", str(ctx.guild.id))
+        message = "Uninvitable bots for this server:\n"
+
+        for b in bots:
+            name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
+            cache_server = await bot.pool.fetchrow("SELECT guild_id, invite_code, name from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+            message += f"\n- {name} [{b['bot_id']}]: {b['cache_server_uninvitable']} [{cache_server['guild_id']}, {cache_server['name']}, {cache_server['invite_code']}]"
+
+            if len(message) >= 1500:
+                await ctx.send(message)
+                message = ""
+        
+        if message:
+            await ctx.send(message)
+        
+        return
+
+    # Show all
+    bots = await bot.pool.fetch("SELECT bot_id, cache_server_uninvitable from bots WHERE cache_server_uninvitable IS NOT NULL")
+
+    message = "Uninvitable bots:\n"
+
+    for b in bots:
+        name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
+        message += f"\n- {name} [{b['bot_id']}]: {b['cache_server_uninvitable']}"
+
+        if len(message) >= 1500:
+            await ctx.send(message)
+            message = ""
+        
+    if message:
+        await ctx.send(message)
 
 @bot.hybrid_command()
 async def make_cache_server(
@@ -404,6 +529,9 @@ async def make_cache_server(
 
         return await ctx.send(msg)
     else:
+        if ctx.guild.id in bot.config.pinned_servers:
+            return await ctx.send("This server is a pinned server and cannot be converted to a cache server")
+
         done_bots = []
         needed_bots_members: list[discord.Member] = []
         for b in bot.config.needed_bots:
@@ -436,7 +564,7 @@ async def make_cache_server(
             logs_category = await ctx.guild.create_category('Logging')
             logs_channel = await logs_category.create_text_channel('system-logs')
             
-            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code) VALUES ($1, $2, $3, $4, $5, $6, $7)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code)
+            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, ctx.guild.name)
             await ctx.send("Cache server added to database")
         else:
             msg = "The following bots have not been added to the server yet:\n"
