@@ -13,6 +13,8 @@ import sys
 import os
 import datetime
 import io
+import importlib
+import uvicorn
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -43,6 +45,12 @@ class BorealisBot(commands.AutoShardedBot):
 
     async def run(self):
         self.pool = await asyncpg.pool.create_pool(self.config.postgres_url)
+        api = importlib.import_module("api")
+        api.bot = bot
+        api.config = config
+        server = uvicorn.Server(config=uvicorn.Config(api.app, workers=3, loop=loop, port=2837))
+        asyncio.create_task(server.serve())
+
         await super().start(self.config.token)
 
 intents = discord.Intents.all()
@@ -56,7 +64,7 @@ async def on_ready():
     validate_members.start()
     ensure_invites.start()
 
-async def handle_member(member: discord.Member, cache_server_info = None):
+async def handle_member(member: discord.Member, cache_server_info):
     """
     Handles a member, including adding them to any needed roles
     
@@ -68,7 +76,7 @@ async def handle_member(member: discord.Member, cache_server_info = None):
         except:
             usp = None
         
-        if usp:
+        if usp and cache_server_info:
             staff_role = member.guild.get_role(int(cache_server_info["staff_role"]))
 
             if not staff_role:
@@ -87,10 +95,6 @@ async def handle_member(member: discord.Member, cache_server_info = None):
                 await member.remove_roles(staff_role) 
 
         return
-
-    # If cache_server_info is None, check if present
-    if not cache_server_info:
-        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
 
     # If still not found...
     if not cache_server_info:
@@ -149,7 +153,8 @@ async def handle_member(member: discord.Member, cache_server_info = None):
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    await handle_member(member)
+    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
+    await handle_member(member, cache_server_info=cache_server_info)
 
 @tasks.loop(minutes=15)
 async def ensure_invites():
@@ -352,7 +357,8 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
         showing += 1
 
         name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
-        msg += f"\n- {name} [{b['bot_id']}]: https://discord.com/api/oauth2/authorize?client_id={b['bot_id']}&guild_id={ctx.guild.id}&scope=bot ({b['added']}, {b['created_at']})"
+        client_id = await bot.pool.fetchval("SELECT client_id from bots WHERE bot_id = $1", b["bot_id"])
+        msg += f"\n- {name} [{b['bot_id']}]: https://discord.com/api/oauth2/authorize?client_id={client_id or b['bot_id']}&guild_id={ctx.guild.id}&scope=bot ({b['added']}, {b['created_at']})"
 
         if len(msg) >= 1500:
             await ctx.send(msg)
@@ -415,10 +421,8 @@ async def make_cache_server(
 
             # Create the 'Needed Bots' role
             needed_bots_role = await ctx.guild.create_role(name="System Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
-            
-            bots_role = await ctx.guild.create_role(name="Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
-
             hs_role = await ctx.guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+            bots_role = await ctx.guild.create_role(name="Bots", permissions=discord.Permissions(view_audit_log=True, create_expressions=True, manage_expressions=True, external_emojis=True, external_stickers=True), color=discord.Color.blurple(), hoist=True)
 
             await ctx.me.add_roles(needed_bots_role, bots_role)
             await ctx.author.add_roles(hs_role)
@@ -444,5 +448,6 @@ async def make_cache_server(
             msg += "\nPlease add these bots to the server and run the command again"
             return await ctx.send(msg)
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(bot.run())
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(bot.run())
