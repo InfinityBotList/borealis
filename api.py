@@ -34,18 +34,19 @@ async def get_cache_server_of_bot(request: Request, bot_id: str):
     return {"guild_id": cache_server, "invite_code": data["invite_code"], "member": member is not None}
 
 @app.post("/addBotToCacheServer", response_model=AddBotToCacheServer)
-async def add_bot_to_cache_server(request: Request, bot_id: str):
+async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type: str):
     """Adds a bot to a cache server. Internal-only"""
     await check_internal(request)
 
     # Check if bot is approved/certified
-    typ = await bot.pool.fetchval("SELECT type FROM bots WHERE bot_id = $1", str(bot_id))
+    if not ignore_bot_type:
+        typ = await bot.pool.fetchval("SELECT type FROM bots WHERE bot_id = $1", str(bot_id))
 
-    if typ is None:
-        raise HTTPException(status_code=404, detail="Bot not found")
-    
-    if typ not in ["approved", "certified"]:
-        raise HTTPException(status_code=403, detail="Bot not approved/certified")
+        if typ is None:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        
+        if typ not in ["approved", "certified"]:
+            raise HTTPException(status_code=403, detail="Bot not approved/certified")
     
     # Check if bot is already in a cache server
     cache_server = await bot.pool.fetchval("SELECT guild_id FROM cache_server_bots WHERE bot_id = $1", bot_id)
