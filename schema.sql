@@ -7,7 +7,8 @@ CREATE TABLE public.cache_servers (
     welcome_channel text not null,
     invite_code text NOT NULL,
     logs_channel text NOT NULL,
-    staff_role text NOT NULL
+    staff_role text NOT NULL,
+    created_at timestamptz not null default now()
 );
 
 ALTER TABLE ONLY public.cache_servers ADD CONSTRAINT cache_servers_pkey PRIMARY KEY (guild_id);

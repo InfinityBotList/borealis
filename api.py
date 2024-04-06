@@ -10,11 +10,6 @@ async def check_internal(request: Request):
     if request.headers.get("X-Forwarded-For"):
         raise HTTPException(status_code=403, detail="Forbidden")
     
-class AddBotToCacheServer(BaseModel):
-    guild_id: str
-    invite_code: str
-    added: bool
-
 @app.get("/getCacheServerOfBot")
 async def get_cache_server_of_bot(request: Request, bot_id: str):
     """Returns the cache server of a bot"""
@@ -33,8 +28,14 @@ async def get_cache_server_of_bot(request: Request, bot_id: str):
 
     return {"guild_id": cache_server, "invite_code": data["invite_code"], "member": member is not None}
 
+class AddBotToCacheServer(BaseModel):
+    guild_id: str
+    name: str
+    invite_code: str
+    added: bool
+
 @app.post("/addBotToCacheServer", response_model=AddBotToCacheServer)
-async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type: str):
+async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type: bool):
     """Adds a bot to a cache server. Internal-only"""
     await check_internal(request)
 
@@ -49,12 +50,17 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
             raise HTTPException(status_code=403, detail="Bot not approved/certified")
     
     # Check if bot is already in a cache server
-    cache_server = await bot.pool.fetchval("SELECT guild_id FROM cache_server_bots WHERE bot_id = $1", bot_id)
+    cache_server = await bot.pool.fetchrow("SELECT guild_id, name FROM cache_server_bots WHERE bot_id = $1", bot_id)
 
     if cache_server is not None:
         # Return invite code
         data = await bot.pool.fetchrow("SELECT invite_code FROM cache_servers WHERE guild_id = $1", cache_server)
-        return {"guild_id": cache_server, "invite_code": data["invite_code"], "added": False}
+        return {
+            "guild_id": cache_server["guild_id"], 
+            "name": cache_server["name"], 
+            "invite_code": data["invite_code"], 
+            "added": False
+        }
 
     # Find a cache server with less than MAX_PER_CACHE_SERVER bots
     available = await bot.pool.fetch("select guild_id, count(*) from cache_server_bots group by guild_id")

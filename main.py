@@ -15,6 +15,7 @@ import datetime
 import io
 import importlib
 import uvicorn
+import aiohttp
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -30,6 +31,7 @@ class Config(BaseModel):
     postgres_url: str
     pinned_servers: list[int]
     needed_bots: list[NeededBots]
+    notify_webhook: str
 
 yaml = YAML(typ="safe")
 with open("config.yaml", "r") as f:
@@ -289,8 +291,8 @@ async def csreport(ctx: commands.Context, only_file: bool = False):
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.cslist"):
-        return await ctx.send("You need ``borealis.cslist`` permission to use this command!")
+    if not has_perm(resolved, "borealis.csreport"):
+        return await ctx.send("You need ``borealis.csreport`` permission to use this command!")
 
     servers = await bot.pool.fetch("SELECT guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code from cache_servers")
 
@@ -335,6 +337,29 @@ async def csreport(ctx: commands.Context, only_file: bool = False):
         file = discord.File(filename="cache_servers.txt", fp=io.BytesIO(msg.encode("utf-8")))
         await ctx.send(file=file)
 
+async def get_selected_bots(guild_id: int | str):
+    # Check currently selected too
+    selected = await bot.pool.fetch("SELECT bot_id, created_at, added from cache_server_bots WHERE guild_id = $1 ORDER BY created_at DESC", str(guild_id))
+
+    if len(selected) < MAX_PER_CACHE_SERVER:
+        # Try selecting other bots and adding it to db
+        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE (type = 'approved' OR type = 'certified') AND cache_server_uninvitable IS NULL AND bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
+
+        for b in not_yet_selected:
+            if len(selected) >= MAX_PER_CACHE_SERVER:
+                break
+
+            created_at = await bot.pool.fetchval("INSERT INTO cache_server_bots (guild_id, bot_id) VALUES ($1, $2) RETURNING created_at", str(guild_id), b["bot_id"])
+            selected.append({"bot_id": b["bot_id"], "created_at": created_at, "added": 0})
+    
+    elif len(selected) > MAX_PER_CACHE_SERVER:
+        remove_amount = len(selected) - MAX_PER_CACHE_SERVER
+        to_remove = selected[:remove_amount]
+        await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = ANY($2)", str(guild_id), [b["bot_id"] for b in to_remove])
+        selected = selected[remove_amount:]
+    
+    return selected
+
 @bot.hybrid_command()
 async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
     """Selects 50 bots for a cache server"""
@@ -351,24 +376,7 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
         return await ctx.send("This server is not a cache server")
 
     # Check currently selected too
-    selected = await bot.pool.fetch("SELECT bot_id, created_at, added from cache_server_bots WHERE guild_id = $1 ORDER BY created_at DESC", str(ctx.guild.id))
-
-    if len(selected) < MAX_PER_CACHE_SERVER:
-        # Try selecting other bots and adding it to db
-        not_yet_selected = await bot.pool.fetch("SELECT bot_id, created_at from bots WHERE (type = 'approved' OR type = 'certified') AND cache_server_uninvitable IS NULL AND bot_id NOT IN (SELECT bot_id from cache_server_bots) ORDER BY RANDOM() DESC LIMIT 50")
-
-        for b in not_yet_selected:
-            if len(selected) >= MAX_PER_CACHE_SERVER:
-                break
-
-            created_at = await bot.pool.fetchval("INSERT INTO cache_server_bots (guild_id, bot_id) VALUES ($1, $2) RETURNING created_at", str(ctx.guild.id), b["bot_id"])
-            selected.append({"bot_id": b["bot_id"], "created_at": created_at, "added": 0})
-    
-    elif len(selected) > MAX_PER_CACHE_SERVER:
-        remove_amount = len(selected) - MAX_PER_CACHE_SERVER
-        to_remove = selected[:remove_amount]
-        await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = ANY($2)", str(ctx.guild.id), [b["bot_id"] for b in to_remove])
-        selected = selected[remove_amount:]
+    selected = await get_selected_bots(ctx.guild.id)
 
     msg = "Selected bots:\n"
 
@@ -394,6 +402,35 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
         await ctx.send(msg)
     
     await ctx.send(f"Total: {len(selected)} bots\nShowing: {showing} bots")
+
+@bot.hybrid_command()
+async def cslist(
+    ctx: commands.Context,
+):
+    """Lists all cache servers, their names, their invites and when they were made"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cslist"):
+        return await ctx.send("You need ``borealis.cslist`` permission to use this command!")
+
+    servers = await bot.pool.fetch("SELECT guild_id, invite_code, name, created_at from cache_servers")
+
+    msg = "Cache Servers:\n"
+
+    for s in servers:            
+        bot_count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1", s["guild_id"])
+
+        msg += f"\n- {s['guild_id']} ({s['name']}) ({bot_count} bots): [{s['invite_code']}, https://discord.gg/{s['invite_code']}] ({s['created_at']})"
+
+        if len(msg) >= 1500:
+            await ctx.send(msg, suppress_embeds=True)
+            msg = ""
+
+    if msg:
+        await ctx.send(msg, suppress_embeds=True)
+
+    await ctx.send(f"Total: {len(servers)} servers")
 
 @bot.hybrid_command()
 async def cs_mark_uninvitable(
@@ -441,12 +478,6 @@ async def cs_unmark_uninvitable(
 
     if not is_cache_server:
         return await ctx.send("This server is not a cache server")
-
-    # Check if bot is in cache_server_bots
-    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(ctx.guild.id), str(bot_id))
-
-    if not count:
-        return await ctx.send("Bot is not in cache server")
 
     await bot.pool.execute("UPDATE bots SET cache_server_uninvitable = NULL WHERE bot_id = $1", str(bot_id))
     await ctx.send("Bot unmarked as uninvitable")
@@ -567,6 +598,9 @@ async def make_cache_server(
             
             await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, ctx.guild.name)
             await ctx.send("Cache server added to database")
+            async with aiohttp.ClientSession() as session:
+                hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
+                await hook.send(content=f"@Bot Reviewers\n\nCache server added: {ctx.guild.name} ({ctx.guild.id}) {invite.url}")
         else:
             msg = "The following bots have not been added to the server yet:\n"
             

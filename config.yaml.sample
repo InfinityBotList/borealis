@@ -1,13 +1,16 @@
 token:
-postgres_url:
+postgres_url: postgresql:///infinity
 pinned_servers:
-    - STAFF_SERVER
+  - 870950609291972618
 needed_bots:
-    # Arcadia
-    - name: Arcadia
-      id: 870728078228324382
-      invite: https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands&guild_id={guild_id}
-    # Popplio
-    - name: Popplio
-      id: 815553000470478850
-      invite: https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands&guild_id={guild_id}
+  - name: Borealis
+    id: 1200677946789212242
+    invite: https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands
+  # Arcadia
+  - name: Arcadia
+    id: 870728078228324382
+    invite: https://discord.com/api/oauth2/authorize?client_id={id}&scope=bot%20applications.commands
+  # Popplio
+  - name: Popplio
+    id: 815553000470478850
+    invite: https://discord.com/api/oauth2/authorize?client_id={id}&scope=bot%20applications.commands
