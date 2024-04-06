@@ -421,6 +421,7 @@ async def cs_mark_uninvitable(
         return await ctx.send("Bot is not in cache server")
 
     await bot.pool.execute("UPDATE bots SET cache_server_uninvitable = $1 WHERE bot_id = $2", reason, str(bot_id))
+    await bot.pool.execute("DELETE FROM cache_server_bots WHERE bot_id = $1", str(bot_id))
     await ctx.send("Bot marked as uninvitable")
 
 @bot.hybrid_command()
