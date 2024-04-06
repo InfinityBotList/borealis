@@ -1,6 +1,7 @@
 -- Servers
 CREATE TABLE public.cache_servers (
     guild_id text NOT NULL,
+    name text NOT NULL,
     bots_role text NOT NULL,
     system_bots_role text NOT NULL,
     welcome_channel text not null,
