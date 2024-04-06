@@ -611,6 +611,68 @@ async def make_cache_server(
             msg += "\nPlease add these bots to the server and run the command again"
             return await ctx.send(msg)
 
+@bot.hybrid_command()
+async def nuke_from_main_server(
+    ctx: commands.Context,
+    guild_id: int
+):
+    """Nukes a server from the main server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.nuke_from_main_server"):
+        return await ctx.send("You need ``borealis.nuke_from_main_server`` permission to use this command!")
+
+    if guild_id not in config.pinned_servers:
+        return await ctx.send("Guild is not a pinned server. Must be temporarily pinned to nuke")
+
+    guild = bot.get_guild(guild_id)
+
+    if not guild:
+        return await ctx.send("Guild not found")
+    
+    bots_to_nuke = await bot.pool.fetch("SELECT bot_id, type, premium from bots WHERE type != 'certified' AND premium = false")
+    
+    class KickAskView(discord.ui.View):
+        def __init__(self, member: discord.Member):
+            super().__init__(timeout=1000)    
+            self.done = False
+            self.member = member
+        
+        @discord.ui.button(label="Kick", style=discord.ButtonStyle.danger, custom_id="kick")
+        async def kick(self, interaction: discord.Interaction, button: discord.ui.Button,):
+            await interaction.response.send_message(f"Kicking {self.member} ({self.member.id})", ephemeral=False)
+            await guild.kick(self.member)
+            self.done = True
+            self.stop()
+        
+        @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, custom_id="nothing")
+        async def nothing(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await interaction.response.send_message(f"Ignoring {self.member} ({self.member.id})", ephemeral=False)
+            self.done = True
+            self.stop()
+
+    for b in bots_to_nuke:
+        bot_obj = guild.get_member(int(b["bot_id"]))
+
+        if not bot_obj:
+            continue
+
+        if bot_obj.id in [815553000470478850, ctx.me.id]:
+            await ctx.send(f"Skipping {bot_obj.name} ({bot_obj.id})")
+            continue # Ignore
+
+        # Ask with a component
+        view = KickAskView(bot_obj)
+
+        random_emoji = secrets.choice(guild.emojis)
+
+        await ctx.send(f"Should I kick {bot_obj.name} ({bot_obj.id}) [type={b['type']}, premium={b['premium']}]? {random_emoji}", view=view)
+        await view.wait()
+
+        if not view.done:
+            return await ctx.send("Timed out")
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(bot.run())
