@@ -672,6 +672,36 @@ async def nuke_from_main_server(
 
         if not view.done:
             return await ctx.send("Timed out")
+    
+    await ctx.send("Done from db")
+
+    for bot_obj in guild.members:
+        if not bot_obj:
+            continue
+
+        if bot_obj.id in [815553000470478850, ctx.me.id]:
+            continue
+
+        if not bot_obj.bot:
+            continue
+
+        # Ensure its not premium or certified
+        typ = await bot.pool.fetchrow("SELECT type, premium from bots WHERE bot_id = $1", str(bot_obj.id))
+
+        if typ and (typ["type"] in ["certified"] or typ["premium"]):
+            continue
+
+        # Ask with a component
+        view = KickAskView(bot_obj)
+
+        random_emoji = secrets.choice(guild.emojis)
+
+        await ctx.send(f"Should I kick {bot_obj.name} ({bot_obj.id}) [not on db]? {random_emoji}", view=view)
+        await view.wait()
+
+        if not view.done:
+            return await ctx.send("Timed out")
+
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
