@@ -50,15 +50,15 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
             raise HTTPException(status_code=403, detail="Bot not approved/certified")
     
     # Check if bot is already in a cache server
-    cache_server = await bot.pool.fetchrow("SELECT guild_id, name FROM cache_server_bots WHERE bot_id = $1", bot_id)
+    cs = await bot.pool.fetchval("SELECT guild_id FROM cache_server_bots WHERE bot_id = $1", bot_id)
 
-    if cache_server is not None:
+    if cs is not None:
         # Return invite code
-        data = await bot.pool.fetchrow("SELECT invite_code FROM cache_servers WHERE guild_id = $1", cache_server)
+        cache_server = await bot.pool.fetchrow("SELECT invite_code, name FROM cache_servers WHERE guild_id = $1", cache_server)
         return {
-            "guild_id": cache_server["guild_id"], 
+            "guild_id": cs, 
             "name": cache_server["name"], 
-            "invite_code": data["invite_code"], 
+            "invite_code": cache_server["invite_code"], 
             "added": False
         }
 
@@ -77,6 +77,6 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
     # Add bot to cache server
     await bot.pool.execute("INSERT INTO cache_server_bots (guild_id, bot_id) VALUES ($1, $2)", guild_id, bot_id)
 
-    data = await bot.pool.fetchrow("SELECT invite_code FROM cache_servers WHERE guild_id = $1", guild_id)
+    data = await bot.pool.fetchrow("SELECT name, invite_code FROM cache_servers WHERE guild_id = $1", guild_id)
 
-    return {"guild_id": guild_id, "invite_code": data["invite_code"], "added": True}
+    return {"guild_id": guild_id, "name": data["name"], "invite_code": data["invite_code"], "added": True}
