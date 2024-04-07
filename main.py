@@ -831,7 +831,9 @@ async def cs_oauth_list(
 
         service_account = has_perm(resolved, "service_account.marker")
 
-        msg += f"\n- {o['user_id']} <@{o['user_id']}> (bot={o['bot']}, service_account={service_account})"
+        user = bot.get_user(int(o["user_id"]))
+
+        msg += f"\n- {o['user_id']} [{user}] (bot={o['bot']}, service_account={service_account})"
 
         if len(msg) >= 1500:
             await ctx.send(msg)
