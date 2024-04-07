@@ -808,11 +808,14 @@ async def cs_oauth_list(
     ctx: commands.Context
 ):
     """Lists all oauth2s configured for cache servers"""
-    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
-    resolved = usp.resolve()
-
-    if not has_perm(resolved, "borealis.cs_oauth_list"):
-        return await ctx.send("You need ``borealis.cs_oauth_list`` permission to use this command!")
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
 
     oauths = await bot.pool.fetch("SELECT user_id, bot from cache_server_oauths")   
     oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
