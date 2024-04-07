@@ -878,7 +878,16 @@ async def cs_oauth_join(
                 resolved_guilds.append(guild.id)
     else:
         for id in guilds.split(","):
-            guild = bot.get_guild(int(id.strip()))
+            id = id.strip()
+
+            guild = None
+            for g in bot.guilds:
+                if id == str(g.id) or id == g.name:
+                    guild = g
+                    break
+                    
+            if not guild:
+                continue
 
             if guild and guild.me.guild_permissions.create_instant_invite:
                 resolved_guilds.append(guild.id)
