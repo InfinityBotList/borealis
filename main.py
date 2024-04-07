@@ -864,11 +864,14 @@ async def cs_oauth_join(
     guilds: str
 ):
     """Joins cache server(s) bypassing typical invite flow. Use all to add to all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
-    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
-    resolved = usp.resolve()
-
-    if not has_perm(resolved, "borealis.cs_oauth_join"):
-        return await ctx.send("You need ``borealis.cs_oauth_join`` permission to use this command!")
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
 
     _oauth_data = await bot.pool.fetchrow("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths WHERE user_id = $1 AND bot = 'borealis'", str(ctx.author.id))
 
@@ -878,7 +881,7 @@ async def cs_oauth_join(
     oauth_data = await refresh_oauth(_oauth_data)
 
     resolved_guilds: list[int] = []
-    if guilds == "all":
+    if guilds == "all"
         resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.create_instant_invite]
     elif guilds == "cs":
         db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
