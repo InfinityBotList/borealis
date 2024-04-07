@@ -612,6 +612,34 @@ async def make_cache_server(
             return await ctx.send(msg)
 
 @bot.hybrid_command()
+async def cs_delete(
+    ctx: commands.Context,
+    guild_id: int = None
+):
+    """Deletes a cache server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_delete"):
+        return await ctx.send("You need ``borealis.cs_delete`` permission to use this command!")
+
+    cs_data = await bot.pool.fetchrow("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", guild_id or str(ctx.guild.id))
+
+    if not cs_data:
+        return await ctx.send("Specified server is not a cache server")
+
+    await bot.pool.execute("DELETE FROM cache_servers WHERE guild_id = $1", guild_id or str(ctx.guild.id))
+    await ctx.send("Cache server deleted")
+    
+    if guild_id:
+        guild = bot.get_guild(guild_id)
+
+        if guild:
+            await guild.leave()
+    else:
+        await ctx.guild.leave()
+
+@bot.hybrid_command()
 async def nuke_from_main_server(
     ctx: commands.Context,
     guild_id: int
