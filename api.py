@@ -1,6 +1,11 @@
 import fastapi
 from fastapi import HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
+import secrets
+import datetime
+from kittycat.kittycat import has_perm
+from kittycat.perms import get_user_staff_perms
 from main import config, bot, MAX_PER_CACHE_SERVER
 
 app = fastapi.FastAPI()
@@ -80,3 +85,67 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
     data = await bot.pool.fetchrow("SELECT name, invite_code FROM cache_servers WHERE guild_id = $1", guild_id)
 
     return {"guild_id": guild_id, "name": data["name"], "invite_code": data["invite_code"], "added": True}
+
+_states = {}
+@app.get("/oauth2")
+async def oauth2(request: Request, code: str | None = None, error: str | None = None, state: str | None = None):
+    """OAuth2 callback"""
+    if error:
+        return HTMLResponse(f"<h1>Error: {error}</h1>")
+    
+    if code is None:
+        state = secrets.token_urlsafe(16)
+        _states[state] = datetime.datetime.now()
+        return RedirectResponse(f"https://discord.com/oauth2/authorize?client_id={config.cache_server_maker.client_id}&redirect_uri={config.base_url}/oauth2&response_type=code&scope=identify%20guilds.join&state={state}")
+
+    if state not in _states:
+        return HTMLResponse("<h1>Error: Invalid state</h1>")
+
+    if (datetime.datetime.now() - _states[state]).total_seconds() > 60:
+        # Remove state
+        del _states[state]
+        return HTMLResponse("<h1>Error: State expired</h1>")
+    
+    # Exchange code for token
+    data = {
+        "client_id": config.cache_server_maker.client_id,
+        "client_secret": config.cache_server_maker.client_secret,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": f"{config.base_url}/oauth2",
+        "scope": "identify guilds.join"
+    }
+
+    async with bot.session.post("https://discord.com/api/v10/oauth2/token", data=data) as resp:
+        del _states[state]
+        if resp.status != 200:
+            err = await resp.text()
+            return HTMLResponse(f"<h1>Error: {resp.status}: {err}</h1>")
+        
+        data = await resp.json()
+
+    # Get user info
+    async with bot.session.get("https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bearer {data['access_token']}"}) as resp:
+        if resp.status != 200:
+            err = await resp.text()
+            return HTMLResponse(f"<h1>Error: {resp.status}: {err}</h1>")
+        
+        user = await resp.json()
+
+        # Check user id
+        id = int(user["id"])
+
+        try:
+            usp = await get_user_staff_perms(bot.pool, id)
+        except Exception as e:
+            return HTMLResponse(f"<h1>Error: {e}</h1>")
+        
+        perms = usp.resolve()
+
+        if not has_perm(perms, "borealis.cache_server_maker"):
+            return HTMLResponse("<h1>Error: You do not have the required permissions (borealis.cache_server_maker)</h1>")
+    
+        # Add to db
+        await bot.pool.execute("INSERT INTO cache_server_oauths (user_id, access_token, refresh_token, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET access_token = $2, refresh_token = $3, expires_at = $4", str(id), data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]))
+
+    return HTMLResponse("<h1>Success! You can now close this tab</h1>")

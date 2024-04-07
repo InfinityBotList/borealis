@@ -26,12 +26,19 @@ class NeededBots(BaseModel):
     name: str
     invite: str
 
+class CacheServerMaker(BaseModel):
+    client_id: int
+    client_secret: str
+    token: str
+
 class Config(BaseModel):
     token: str
     postgres_url: str
     pinned_servers: list[int]
     needed_bots: list[NeededBots]
     notify_webhook: str
+    base_url: str
+    cache_server_maker: CacheServerMaker
 
 yaml = YAML(typ="safe")
 with open("config.yaml", "r") as f:
@@ -44,6 +51,7 @@ class BorealisBot(commands.AutoShardedBot):
         super().__init__(command_prefix="#", intents=discord.Intents.all())
         self.config = config
         self.pool = None
+        self.session = aiohttp.ClientSession()
 
     async def run(self):
         self.pool = await asyncpg.pool.create_pool(self.config.postgres_url)
@@ -57,6 +65,7 @@ class BorealisBot(commands.AutoShardedBot):
 intents = discord.Intents.all()
 
 bot = BorealisBot(config)
+cache_server_bot = discord.Client(intents=discord.Intents.all())
 
 # On ready handler
 @bot.event
@@ -65,7 +74,108 @@ async def on_ready():
     validate_members.start()
     ensure_invites.start()
     ensure_cache_servers.start()
+    nuke_not_approved.start()
+    await cache_server_bot.start(config.cache_server_maker.token)
     await bot.tree.sync()
+
+@cache_server_bot.event
+async def on_ready():
+    for guild in cache_server_bot.guilds:
+        if guild.owner_id == cache_server_bot.user.id:
+            await guild.delete()
+        else:
+            await guild.leave()
+
+async def create_unprovisioned_cache_server():
+    await cache_server_bot.wait_until_ready()
+
+    oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
+
+    if not oauth_md:
+        raise Exception("Oauth metadata not setup, please run #cs_oauth_mdset to set owner id for new cache servers")
+    
+    oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths")
+
+    for cred in oauth_creds:
+        # Check if expired, if so, refresh access token and update db
+        if cred["expires_at"] < datetime.datetime.now(tz=datetime.timezone.utc):
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": cred["refresh_token"],
+                "client_id": config.cache_server_maker.client_id,
+                "client_secret": config.cache_server_maker.client_secret,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{bot.config.base_url}/api/v10/oauth2/token", data=data) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Failed to refresh token for {cred['user_id']}")
+                    
+                    data = await resp.json()
+                    await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
+
+    guild: discord.Guild = await cache_server_bot.create_guild(name="IBLCS-" + secrets.token_hex(4))
+
+    # Add owner first to transfer ownership
+    owner_creds = None
+    for cred in oauth_creds:
+        if cred["user_id"] == oauth_md["owner_id"]:
+            owner_creds = cred
+            break
+    
+    if not owner_creds:
+        raise Exception("Owner credentials not found")
+    
+    async with aiohttp.ClientSession() as session:
+        # First add owner
+        async with session.put(f"https://discord.com/api/v10/guilds/{guild.id}/members/{owner_creds['user_id']}", headers={"Authorization": f"Bot {config.cache_server_maker.token}"}, json={"access_token": owner_creds["access_token"]}) as resp:
+            if not resp.ok:
+                raise Exception(f"Failed to add owner to guild: {await resp.text()}")
+        
+        await asyncio.sleep(1)
+
+        # Add all other users
+        for cred in oauth_creds:
+            if cred["user_id"] == owner_creds["user_id"]:
+                continue
+
+            async with session.put(f"https://discord.com/api/v10/guilds/{guild.id}/members/{cred['user_id']}", headers={"Authorization": f"Bot {config.cache_server_maker.token}"}, json={"access_token": cred["access_token"]}) as resp:
+                if not resp.ok:
+                    raise Exception(f"Failed to add user to guild: {await resp.text()}")
+
+            await asyncio.sleep(1)
+        
+    # create oauthadmin role
+    oauth_admin_role = await guild.create_role(name="Oauth Admin", permissions=discord.Permissions.all(), color=discord.Color.blurple(), hoist=True)
+
+    # Give all users oauthadmin role
+    async for member in guild.fetch_members():
+        await member.add_roles(oauth_admin_role)
+
+    # Send everyone ping to temp channel
+    temp_chan = await guild.create_text_channel("temp")
+
+    await temp_chan.send(
+        f"@everyone"
+    )
+
+    msg = f"""
+New unprovisioned cache server created!
+
+Add the following bots to the server: 
+
+        """
+
+    for b in bot.config.needed_bots:
+        invite = b.invite.replace("{id}", str(b.id)).replace("{perms}", "8")
+        msg += f"\n- {b.name}: [{invite}]\n"
+    
+    msg += "\n3. Run the following command in the server: ``#make_cache_server true``"
+
+    await temp_chan.send(msg)
+
+    # Transfer ownership and leave
+    await guild.edit(owner=discord.Object(int(owner_creds["user_id"])))
+    await guild.leave()
 
 async def handle_member(member: discord.Member, cache_server_info):
     """
@@ -159,10 +269,35 @@ async def on_member_join(member: discord.Member):
     cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
     await handle_member(member, cache_server_info=cache_server_info)
 
+@tasks.loop(minutes=5)
+async def nuke_not_approved():
+    print (f"Starting nuke_not_approved task on {datetime.datetime.now()}")
+
+    # Get all bots that are not approved or certified
+    not_approved = await bot.pool.fetch("SELECT bot_id, guild_id from cache_server_bots WHERE bot_id NOT IN (SELECT bot_id from bots WHERE type = 'approved' OR type = 'certified')")
+
+    for b in not_approved:
+        # Delete it first
+        await bot.pool.execute("DELETE FROM cache_server_bots WHERE bot_id = $1", b["bot_id"])
+
+        guild = bot.get_guild(int(b["guild_id"]))
+
+        if guild:
+            member = guild.get_member(int(b["bot_id"]))
+
+            if member:
+                await member.kick(reason="Not approved or certified")
+
 _ensure_cache_server = {} # delete if fail check 3 times
 @tasks.loop(minutes=5)
 async def ensure_cache_servers():
     print(f"Starting ensure_cache_servers task on {datetime.datetime.now()}")
+
+    # First ensure only one row of cache_server_oauth_md exists
+    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_oauth_md")
+
+    if count > 1:
+        await bot.pool.execute("DELETE FROM cache_server_oauth_md WHERE id NOT IN (SELECT id from cache_server_oauth_md ORDER BY id DESC LIMIT 1)")
 
     # Check for guilds we are not in
     unknown_guilds = await bot.pool.fetch("SELECT guild_id from cache_servers WHERE guild_id != ALL($1)", [str(g.id) for g in bot.guilds])
@@ -176,6 +311,7 @@ async def ensure_cache_servers():
             await bot.pool.execute("DELETE FROM cache_servers WHERE guild_id = $1", guild["guild_id"])
 
         _ensure_cache_server[guild["guild_id"]] = c + 1
+
 
 @tasks.loop(minutes=15)
 async def ensure_invites():
@@ -546,23 +682,27 @@ async def make_cache_server(
 
     msg = ""
 
+    oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
+
     if not is_cache_server:
-        msg = f"""
-1. Create a new server with the following name: IBLCS-{secrets.token_hex(4)}
-2. Add the following bots to the server: 
+        # Ensure user is in oauth flow
+        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_oauths WHERE user_id = $1", str(ctx.author.id))
 
-    """
+        if not count:
+            return await ctx.send("You need to be in the oauth flow to create a cache server")
 
-        for b in bot.config.needed_bots:
-            invite = b.invite.replace("{id}", str(b.id)).replace("{perms}", "8")
-            msg += f"\n- {b.name}: [{invite}]\n"
-        
-        msg += "\n3. Run the following command in the server: ``#make_cache_server true``"
-
-        return await ctx.send(msg)
+        try:
+            await create_unprovisioned_cache_server()
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__, file=sys.stderr)
+            return await ctx.send(f"Failed to create unprovisioned cache server: {e}")
+        await ctx.send("Provisioned new server")
     else:
         if ctx.guild.id in bot.config.pinned_servers:
             return await ctx.send("This server is a pinned server and cannot be converted to a cache server")
+
+        if str(ctx.guild.owner_id) != oauth_md["owner_id"]:
+            return await ctx.send("Cache server owner id and expected owner id do not match")
 
         done_bots = []
         needed_bots_members: list[discord.Member] = []
@@ -638,6 +778,90 @@ async def cs_delete(
             await guild.leave()
     else:
         await ctx.guild.leave()
+
+@bot.hybrid_command()
+async def cs_oauth_list(
+    ctx: commands.Context
+):
+    """Lists all oauth2s configured for cache servers"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_oauth_list"):
+        return await ctx.send("You need ``borealis.cs_oauth_list`` permission to use this command!")
+
+    oauths = await bot.pool.fetch("SELECT user_id from cache_server_oauths")   
+    oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
+
+    msg = "OAuths:\n"
+
+    for o in oauths:
+        try:
+            usp = await get_user_staff_perms(bot.pool, o["user_id"])
+            resolved = usp.resolve()
+        except:
+            resolved = []
+
+        service_account = has_perm(resolved, "service_account.marker")
+
+        msg += f"\n- {o['user_id']} <@{o['user_id']}> (service account={service_account})"
+
+        if len(msg) >= 1500:
+            await ctx.send(msg)
+            msg = ""
+
+    if msg:
+        await ctx.send(msg)
+
+    if oauth_md:
+        msg = f"Metadata:\n- Currently selected cache server owner: {oauth_md['owner_id']} (<@{oauth_md['owner_id']}>)"
+        await ctx.send(msg)
+
+@bot.hybrid_command()
+async def cs_oauth_add(
+    ctx: commands.Context,
+    bypass_checks: bool = False,
+):
+    """Adds an oauth2 to the cache server"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_oauth_add"):
+        return await ctx.send("You need ``borealis.cs_oauth_add`` permission to use this command!")
+
+    if not bypass_checks:
+        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_oauths WHERE user_id = $1", str(ctx.author.id))
+
+        if count:
+            return await ctx.send("User is already an oauth2")
+
+    await ctx.send(f"Visit {config.base_url}/oauth2 to continue")    
+
+@bot.hybrid_command()
+async def cs_oauth_mdset(
+    ctx: commands.Context,
+    owner_id: str
+):
+    """Sets a user as a service account or not"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_oauth_mdset"):
+        return await ctx.send("You need ``borealis.cs_oauth_mdset`` permission to use this command!")
+
+    oauth_v = await bot.pool.fetchval("SELECT user_id from cache_server_oauths WHERE user_id = $1", owner_id)
+
+    if not oauth_v:
+        return await ctx.send("User is not an oauth2 user")
+    
+    md_count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_oauth_md")
+
+    if md_count:
+        await bot.pool.execute("UPDATE cache_server_oauth_md SET owner_id = $1", owner_id)
+    else:
+        await bot.pool.execute("INSERT INTO cache_server_oauth_md (owner_id) VALUES ($1)", owner_id)
+
+    await ctx.send("Cache Server OAuth Metadata updated")
 
 @bot.hybrid_command()
 async def nuke_from_main_server(

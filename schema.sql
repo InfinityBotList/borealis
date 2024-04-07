@@ -20,3 +20,14 @@ CREATE TABLE public.cache_server_bots (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     added integer DEFAULT 0 NOT NULL
 );
+
+CREATE TABLE cache_server_oauths (
+    user_id text NOT NULL UNIQUE,
+    access_token text NOT NULL,
+    refresh_token text NOT NULL,
+    expires_at timestamptz NOT NULL
+);
+
+create table cache_server_oauth_md (
+    owner_id text not null references cache_server_oauths(user_id) on update restrict on delete cascade,
+);
