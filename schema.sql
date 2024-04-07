@@ -22,12 +22,14 @@ CREATE TABLE public.cache_server_bots (
 );
 
 CREATE TABLE cache_server_oauths (
-    user_id text NOT NULL UNIQUE,
+    bot text not null default "doxycycline", -- 0 = doxycycline, 1 = borealis
+    user_id text NOT NULL,
     access_token text NOT NULL,
     refresh_token text NOT NULL,
-    expires_at timestamptz NOT NULL
+    expires_at timestamptz NOT NULL,
+    UNIQUE (bot, user_id)
 );
 
 create table cache_server_oauth_md (
-    owner_id text not null references cache_server_oauths(user_id) on update restrict on delete cascade,
+    owner_id text not null
 );

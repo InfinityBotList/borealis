@@ -39,6 +39,8 @@ class Config(BaseModel):
     notify_webhook: str
     base_url: str
     cache_server_maker: CacheServerMaker
+    borealis_client_id: int
+    borealis_client_secret: str
 
 yaml = YAML(typ="safe")
 with open("config.yaml", "r") as f:
@@ -104,11 +106,13 @@ async def refresh_oauth(cred: dict):
                 await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
 
             return {
+                "user_id": cred["user_id"],
                 "access_token": data["access_token"],
                 "refresh_token": data["refresh_token"],
             }
     
     return {
+        "user_id": cred["user_id"], 
         "access_token": cred["access_token"],
         "refresh_token": cred["refresh_token"],
     }
@@ -121,10 +125,16 @@ async def create_unprovisioned_cache_server():
     if not oauth_md:
         raise Exception("Oauth metadata not setup, please run #cs_oauth_mdset to set owner id for new cache servers")
     
-    _oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths")
+    _oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths WHERE bot = 'doxycycline'")
 
     oauth_creds = []
     for cred in _oauth_creds:
+        usp = await get_user_staff_perms(bot.pool, int(cred["user_id"]))
+        resolved = usp.resolve()
+
+        if not has_perm(resolved, "borealis.make_cache_servers"):
+            continue # Don't add this user
+
         oauth_creds.append(await refresh_oauth(cred))
         
     guild: discord.Guild = await cache_server_bot.create_guild(name="IBLCS-" + secrets.token_hex(4))
@@ -804,21 +814,21 @@ async def cs_oauth_list(
     if not has_perm(resolved, "borealis.cs_oauth_list"):
         return await ctx.send("You need ``borealis.cs_oauth_list`` permission to use this command!")
 
-    oauths = await bot.pool.fetch("SELECT user_id from cache_server_oauths")   
+    oauths = await bot.pool.fetch("SELECT user_id, bot from cache_server_oauths")   
     oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
 
     msg = "OAuths:\n"
 
     for o in oauths:
         try:
-            usp = await get_user_staff_perms(bot.pool, o["user_id"])
+            usp = await get_user_staff_perms(bot.pool, int(o["user_id"]))
             resolved = usp.resolve()
         except:
             resolved = []
 
         service_account = has_perm(resolved, "service_account.marker")
 
-        msg += f"\n- {o['user_id']} <@{o['user_id']}> (service account={service_account})"
+        msg += f"\n- {o['user_id']} <@{o['user_id']}> (bot={o['bot']} service account={service_account})"
 
         if len(msg) >= 1500:
             await ctx.send(msg)
@@ -836,18 +846,15 @@ async def cs_oauth_add(
     ctx: commands.Context,
     bypass_checks: bool = False,
 ):
-    """Adds an oauth2 to the cache server"""
-    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
-    resolved = usp.resolve()
-
-    if not has_perm(resolved, "borealis.cs_oauth_add"):
-        return await ctx.send("You need ``borealis.cs_oauth_add`` permission to use this command!")
-
-    if not bypass_checks:
-        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_oauths WHERE user_id = $1", str(ctx.author.id))
-
-        if count:
-            return await ctx.send("User is already an oauth2")
+    """Sets up oauth2 for a user"""
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
 
     await ctx.send(f"Visit {config.base_url}/oauth2 to continue")    
 
@@ -863,7 +870,11 @@ async def cs_oauth_join(
     if not has_perm(resolved, "borealis.cs_oauth_join"):
         return await ctx.send("You need ``borealis.cs_oauth_join`` permission to use this command!")
 
-    _oauth_data = await bot.pool.fetchrow("SELECT user_id from cache_server_oauths WHERE user_id = $1", str(ctx.author.id))
+    _oauth_data = await bot.pool.fetchrow("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths WHERE user_id = $1 AND bot = 'borealis'", str(ctx.author.id))
+
+    if not _oauth_data:
+        return await ctx.send("User has not authorized to oauth2 yet *for borealis*, use ``cs_oauth_add`` to do so")
+
     oauth_data = await refresh_oauth(_oauth_data)
 
     resolved_guilds: list[int] = []
@@ -899,13 +910,16 @@ async def cs_oauth_join(
     async with aiohttp.ClientSession() as session:
         for g in resolved_guilds:
             await ctx.send(f"Joining {g}")
+
             data = {
                 "access_token": oauth_data["access_token"],
             }
-            async with session.post(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {bot.config.token}"}, data=data) as resp:
+            async with session.put(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {bot.token}"}, json=data) as resp:
                 if not resp.ok:
                     err = await resp.json()
                     await ctx.send(f"Failed to join {g}: {err}")
+                    await asyncio.sleep(3)
+                    continue
 
             await ctx.send(f"Joined {g}")
             await asyncio.sleep(3)

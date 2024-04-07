@@ -95,21 +95,23 @@ async def oauth2(request: Request, code: str | None = None, error: str | None = 
     
     if code is None:
         state = secrets.token_urlsafe(16)
-        _states[state] = datetime.datetime.now()
-        return RedirectResponse(f"https://discord.com/oauth2/authorize?client_id={config.cache_server_maker.client_id}&redirect_uri={config.base_url}/oauth2&response_type=code&scope=identify%20guilds.join&state={state}")
+        _states[state] = [datetime.datetime.now(), "borealis"]
+        return RedirectResponse(f"https://discord.com/oauth2/authorize?client_id={config.borealis_client_id}&redirect_uri={config.base_url}/oauth2&response_type=code&scope=identify%20guilds.join&state={state}")
 
     if state not in _states:
         return HTMLResponse("<h1>Error: Invalid state</h1>")
 
-    if (datetime.datetime.now() - _states[state]).total_seconds() > 60:
+    state_created_at, state_bot = _states[state]
+    
+    if (datetime.datetime.now() - state_created_at).total_seconds() > 60:
         # Remove state
         del _states[state]
         return HTMLResponse("<h1>Error: State expired</h1>")
     
     # Exchange code for token
     data = {
-        "client_id": config.cache_server_maker.client_id,
-        "client_secret": config.cache_server_maker.client_secret,
+        "client_id": config.cache_server_maker.client_id if state_bot == "doxycycline" else config.borealis_client_id,
+        "client_secret": config.cache_server_maker.client_secret if state_bot == "doxycycline" else config.borealis_client_secret,
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": f"{config.base_url}/oauth2",
@@ -139,13 +141,22 @@ async def oauth2(request: Request, code: str | None = None, error: str | None = 
             usp = await get_user_staff_perms(bot.pool, id)
         except Exception as e:
             return HTMLResponse(f"<h1>Error: {e}</h1>")
-        
-        perms = usp.resolve()
 
-        if not has_perm(perms, "borealis.cs_oauth_add"):
-            return HTMLResponse("<h1>Error: You do not have the required permissions (borealis.cache_server_maker)</h1>")
+        try:
+            usp = await get_user_staff_perms(bot.pool, id)
+            resolved = usp.resolve()
+        except:
+            resolved = []
+        
+        if not resolved:
+            return HTMLResponse("<h1>Error: You are not a staff member</h1>")
     
         # Add to db
-        await bot.pool.execute("INSERT INTO cache_server_oauths (user_id, access_token, refresh_token, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET access_token = $2, refresh_token = $3, expires_at = $4", str(id), data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]))
+        await bot.pool.execute("INSERT INTO cache_server_oauths (user_id, access_token, refresh_token, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, bot) DO UPDATE SET access_token = $2, refresh_token = $3, expires_at = $4", str(id), data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]))
+
+    if has_perm(usp, "borealis.make_cache_servers") and state_bot == "borealis":
+        # Set new state to doxycycline and refresh back to /oauth2 with state param
+        _states[state] = [datetime.datetime.now(), "doxycycline"]
+        return RedirectResponse(f"https://discord.com/oauth2/authorize?client_id={config.cache_server_maker.client_id}&redirect_uri={config.base_url}/oauth2&response_type=code&scope=identify%20guilds.join&state={state}")
 
     return HTMLResponse("<h1>Success! You can now close this tab</h1>")
