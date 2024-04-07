@@ -142,7 +142,7 @@ async def oauth2(request: Request, code: str | None = None, error: str | None = 
         
         perms = usp.resolve()
 
-        if not has_perm(perms, "borealis.cache_server_maker"):
+        if not has_perm(perms, "borealis.cs_oauth_add"):
             return HTMLResponse("<h1>Error: You do not have the required permissions (borealis.cache_server_maker)</h1>")
     
         # Add to db

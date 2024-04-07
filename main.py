@@ -86,6 +86,33 @@ async def on_ready():
         else:
             await guild.leave()
 
+async def refresh_oauth(cred: dict):
+    # Check if expired, if so, refresh access token and update db
+    if cred["expires_at"] < datetime.datetime.now(tz=datetime.timezone.utc):
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": cred["refresh_token"],
+            "client_id": config.cache_server_maker.client_id,
+            "client_secret": config.cache_server_maker.client_secret,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{bot.config.base_url}/api/v10/oauth2/token", data=data) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to refresh token for {cred['user_id']}")
+                
+                data = await resp.json()
+                await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
+
+            return {
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+            }
+    
+    return {
+        "access_token": cred["access_token"],
+        "refresh_token": cred["refresh_token"],
+    }
+
 async def create_unprovisioned_cache_server():
     await cache_server_bot.wait_until_ready()
 
@@ -94,25 +121,12 @@ async def create_unprovisioned_cache_server():
     if not oauth_md:
         raise Exception("Oauth metadata not setup, please run #cs_oauth_mdset to set owner id for new cache servers")
     
-    oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths")
+    _oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths")
 
-    for cred in oauth_creds:
-        # Check if expired, if so, refresh access token and update db
-        if cred["expires_at"] < datetime.datetime.now(tz=datetime.timezone.utc):
-            data = {
-                "grant_type": "refresh_token",
-                "refresh_token": cred["refresh_token"],
-                "client_id": config.cache_server_maker.client_id,
-                "client_secret": config.cache_server_maker.client_secret,
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{bot.config.base_url}/api/v10/oauth2/token", data=data) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Failed to refresh token for {cred['user_id']}")
-                    
-                    data = await resp.json()
-                    await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
-
+    oauth_creds = []
+    for cred in _oauth_creds:
+        oauth_creds.append(await refresh_oauth(cred))
+        
     guild: discord.Guild = await cache_server_bot.create_guild(name="IBLCS-" + secrets.token_hex(4))
 
     # Add owner first to transfer ownership
@@ -837,6 +851,59 @@ async def cs_oauth_add(
 
     await ctx.send(f"Visit {config.base_url}/oauth2 to continue")    
 
+@bot.hybrid_command()
+async def cs_oauth_join(
+    ctx: commands.Context,
+    guilds: str
+):
+    """Joins cache server(s) bypassing typical invite flow. Use all to add to all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_oauth_join"):
+        return await ctx.send("You need ``borealis.cs_oauth_join`` permission to use this command!")
+
+    _oauth_data = await bot.pool.fetchrow("SELECT user_id from cache_server_oauths WHERE user_id = $1", str(ctx.author.id))
+    oauth_data = await refresh_oauth(_oauth_data)
+
+    resolved_guilds: list[int] = []
+    if guilds == "all":
+        resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.create_instant_invite]
+    elif guilds == "cs":
+        db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
+        for g in db_ids:
+            guild = bot.get_guild(int(g["guild_id"]))
+
+            if guild and guild.me.guild_permissions.create_instant_invite:
+                resolved_guilds.append(guild.id)
+    else:
+        for id in guilds.split(","):
+            guild = bot.get_guild(int(id.strip()))
+
+            if guild and guild.me.guild_permissions.create_instant_invite:
+                resolved_guilds.append(guild.id)
+        
+
+    if not resolved_guilds:
+        return await ctx.send("No servers found")
+
+    async with aiohttp.ClientSession() as session:
+        for g in resolved_guilds:
+            await ctx.send(f"Joining {g}")
+            data = {
+                "access_token": oauth_data["access_token"],
+            }
+            async with session.post(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {bot.config.token}"}, data=data) as resp:
+                if not resp.ok:
+                    err = await resp.json()
+                    await ctx.send(f"Failed to join {g}: {err}")
+
+            await ctx.send(f"Joined {g}")
+            await asyncio.sleep(3)
+    
+    await ctx.send("Done")
+        
+    
 @bot.hybrid_command()
 async def cs_oauth_mdset(
     ctx: commands.Context,
