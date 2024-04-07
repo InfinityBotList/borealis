@@ -881,7 +881,7 @@ async def cs_oauth_join(
     oauth_data = await refresh_oauth(_oauth_data)
 
     resolved_guilds: list[int] = []
-    if guilds == "all"
+    if guilds == "all":
         resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.create_instant_invite]
     elif guilds == "cs":
         db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
