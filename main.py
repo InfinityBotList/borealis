@@ -856,7 +856,7 @@ async def cs_oauth_add(
     if not resolved:
         return await ctx.send("User is not a staff member")
 
-    await ctx.send(f"Visit {config.base_url}/oauth2 to continue")    
+    await ctx.send(f"Visit {config.base_url}/oauth2 to continue. Note that you may need to authorize yourself twice in a row through Discord (so don't get confused), once for Borealis and a second time for Doxycycline (if you have permission such as Human Resources etc)")    
 
 @bot.hybrid_command()
 async def cs_oauth_join(

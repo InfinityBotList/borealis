@@ -152,9 +152,9 @@ async def oauth2(request: Request, code: str | None = None, error: str | None = 
             return HTMLResponse("<h1>Error: You are not a staff member</h1>")
     
         # Add to db
-        await bot.pool.execute("INSERT INTO cache_server_oauths (user_id, access_token, refresh_token, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, bot) DO UPDATE SET access_token = $2, refresh_token = $3, expires_at = $4", str(id), data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]))
+        await bot.pool.execute("INSERT INTO cache_server_oauths (user_id, access_token, refresh_token, expires_at, bot) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, bot) DO UPDATE SET access_token = $2, refresh_token = $3, expires_at = $4", str(id), data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), state_bot)
 
-    if has_perm(usp, "borealis.make_cache_servers") and state_bot == "borealis":
+    if has_perm(resolved, "borealis.make_cache_servers") and state_bot == "borealis":
         # Set new state to doxycycline and refresh back to /oauth2 with state param
         _states[state] = [datetime.datetime.now(), "doxycycline"]
         return RedirectResponse(f"https://discord.com/oauth2/authorize?client_id={config.cache_server_maker.client_id}&redirect_uri={config.base_url}/oauth2&response_type=code&scope=identify%20guilds.join&state={state}")
