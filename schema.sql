@@ -23,7 +23,7 @@ CREATE TABLE public.cache_server_bots (
 
 CREATE TABLE cache_server_oauths (
     bot text not null default "doxycycline", -- 0 = doxycycline, 1 = borealis
-    user_id text NOT NULL,
+    user_id text NOT NULL references staff_members(user_id) ON UPDATE CASCADE ON DELETE CASCADE,
     access_token text NOT NULL,
     refresh_token text NOT NULL,
     expires_at timestamptz NOT NULL,
