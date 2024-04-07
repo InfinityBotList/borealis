@@ -914,7 +914,7 @@ async def cs_oauth_join(
             data = {
                 "access_token": oauth_data["access_token"],
             }
-            async with session.put(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {bot.token}"}, json=data) as resp:
+            async with session.put(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {config.token}"}, json=data) as resp:
                 if not resp.ok:
                     err = await resp.json()
                     await ctx.send(f"Failed to join {g}: {err}")
