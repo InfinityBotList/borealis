@@ -6,7 +6,7 @@ import logging
 import asyncpg
 import asyncio
 from kittycat.perms import get_user_staff_perms
-from kittycat.kittycat import has_perm
+from kittycat.kittycat import StaffPermissions, has_perm
 import secrets
 import traceback
 import sys
@@ -858,6 +858,103 @@ async def cs_delete(
             await guild.leave()
     else:
         await ctx.guild.leave()
+
+@bot.hybrid_command()
+async def cs_leave(
+    ctx: commands.Context,
+    guilds: str,
+    user: discord.User | None = commands.parameter(default=None, description="Who to use for leaving. Defaults to author"),
+):
+    """Leaves cache server(s). Use all to remove from all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        usp = StaffPermissions(user_positions=[], perm_overrides=[])
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
+
+    if user:
+        if not has_perm(resolved, "borealis.cs_leave_other"):
+            return await ctx.send("You need ``borealis.cs_leave_other`` permission to remove other people from cache servers!")
+
+        # Check if member has lower index than us, if so then error
+        try:
+            usp_user = await get_user_staff_perms(bot.pool, user.id)
+        except:
+            usp_user = StaffPermissions(user_positions=[], perm_overrides=[])
+
+        lowest_index = 655356553565535
+        for p in usp.user_positions:
+            if p.index < lowest_index:
+                lowest_index = p.index
+        
+        lowest_index_user = 655356553565535
+        for p in usp_user.user_positions:
+            if p.index < lowest_index_user:
+                lowest_index_user = p.index
+        
+        if lowest_index_user <= lowest_index:
+            return await ctx.send("You cannot remove someone with a lower or equal index (higher or equal in hierarchy) than you from cache servers")
+
+    resolved_guilds: list[int] = []
+    if guilds == "all":
+        resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.kick_members]
+    elif guilds == "cs":
+        db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
+        for g in db_ids:
+            guild = bot.get_guild(int(g["guild_id"]))
+
+            if guild and guild.me.guild_permissions.kick_members:
+                resolved_guilds.append(guild.id)
+    else:
+        for id in guilds.split(","):
+            id = id.strip()
+
+            guild = None
+            for g in bot.guilds:
+                if id == str(g.id) or id == g.name:
+                    guild = g
+                    break
+                    
+            if not guild:
+                continue
+
+            if guild and guild.me.guild_permissions.kick_members:
+                resolved_guilds.append(guild.id)
+        
+
+    if not resolved_guilds:
+        return await ctx.send("No servers found")
+
+    user = user if user else ctx.author
+    for g in resolved_guilds:
+        if g in bot.config.pinned_servers:
+            continue
+
+        guild = bot.get_guild(g)
+
+        if not guild:
+            continue
+
+        member = guild.get_member(user.id)
+
+        if not member:
+            continue
+            
+        # Check if member is higher in hierarchy than me
+        if member.top_role > guild.me.top_role:
+            await ctx.send(f"User {user.id} ({user.name}) is higher in hierarchy than me in guild {guild.id} ({guild.name}), skipping ({member.top_role} >= {guild.me.top_role})")
+            continue
+
+        await ctx.send(f"Making user {user.id} ({user.name}) leave {guild.id} ({guild.name})")
+        await member.kick(reason="Leaving cache server")
+        await ctx.send(f"Successfully kicked {user.id} ({user.name}) from {guild.id} ({guild.name})")
+        await asyncio.sleep(5)
+
+    await ctx.send("Done")
 
 @bot.hybrid_command()
 async def cs_oauth_list(
