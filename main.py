@@ -88,6 +88,64 @@ async def on_ready():
         else:
             await guild.leave()
 
+async def create_cache_server(guild: discord.Guild):
+    # Check that we're not already in a cache server
+    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(guild.id))
+
+    if count:
+        return False
+    
+    oauth_md = await bot.pool.fetchrow("SELECT owner_id from cache_server_oauth_md")
+
+    if guild.id in bot.config.pinned_servers:
+        return False
+
+    if str(guild.owner_id) != oauth_md["owner_id"]:
+        return False
+
+    done_bots = []
+    needed_bots_members: list[discord.Member] = []
+    for b in bot.config.needed_bots:
+        member = guild.get_member(b.id)
+
+        if member:
+            done_bots.append(b.name)
+            needed_bots_members.append(member)
+            continue
+        
+    not_yet_added = list(filter(lambda b: b.name not in done_bots, bot.config.needed_bots))
+    if not not_yet_added:
+        if not guild.me.guild_permissions.administrator:
+            raise Exception("Please give Borealis administrator in order to continue")
+
+        # Create the 'Needed Bots' role
+        needed_bots_role = await guild.create_role(name="System Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+        hs_role = await guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
+        bots_role = await guild.create_role(name="Bots", permissions=discord.Permissions(view_audit_log=True, create_expressions=True, manage_expressions=True, external_emojis=True, external_stickers=True), color=discord.Color.blurple(), hoist=True)
+
+        await guild.me.add_roles(needed_bots_role, bots_role)
+
+        for m in needed_bots_members:
+            await m.add_roles(needed_bots_role, bots_role)
+
+        welcome_category = await guild.create_category("Welcome")
+        welcome_channel = await welcome_category.create_text_channel("welcome")
+        invite = await welcome_channel.create_invite(reason="Cache server invite", unique=True, max_uses=0, max_age=0)
+        logs_category = await guild.create_category('Logging')
+        logs_channel = await logs_category.create_text_channel('system-logs')
+        
+        await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", str(guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, guild.name)
+        async with aiohttp.ClientSession() as session:
+            hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
+            await hook.send(content=f"@Bot Reviewers\n\nCache server added: {guild.name} ({guild.id}) {invite.url}")
+
+        for member in guild.members:
+            await handle_member(member, cache_server_info={"bots_role": bots_role.id, "system_bots_role": needed_bots_role.id, "logs_channel": logs_channel.id, "staff_role": hs_role.id})
+
+        return True
+    else:
+        raise Exception(f"The following bots have not been added to the server yet: {', '.join([f'{b.id} ({b.name})' for b in not_yet_added])}")
+
 async def refresh_oauth(cred: dict):
     # Check if expired, if so, refresh access token and update db
     if cred["expires_at"] < datetime.datetime.now(tz=datetime.timezone.utc):
@@ -291,7 +349,17 @@ async def handle_member(member: discord.Member, cache_server_info):
 @bot.event
 async def on_member_join(member: discord.Member):
     cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
-    await handle_member(member, cache_server_info=cache_server_info)
+    
+    if not cache_server_info:
+        try:
+            res = await create_cache_server(member.guild)
+
+            if not res:
+                print(f"Not making cache server for {member.guild.name} ({member.guild.id}) [failed checks]")
+        except Exception as exc:
+            print(f"Not making cache server for {member.guild.name} ({member.guild.id}) due to reason: {exc}")
+    else:
+        await handle_member(member, cache_server_info=cache_server_info)
 
 @tasks.loop(minutes=5)
 async def nuke_not_approved():
@@ -715,6 +783,15 @@ async def make_cache_server(
         if not count:
             return await ctx.send("You need to be in the oauth flow to create a cache server")
 
+        # Check that we're not already in a cache server
+        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
+
+        if count:
+            return await ctx.send("You are already in a cache server. Did you mean ``#make_cache_server true``?")
+
+        if ctx.guild.name.startswith("IBLCS"):
+            return await ctx.send("This server is already an unprovisioned cache server. Did you mean ``#make_cache_server true``?")
+
         try:
             await create_unprovisioned_cache_server()
         except Exception as e:
@@ -743,28 +820,7 @@ async def make_cache_server(
             if not ctx.me.guild_permissions.administrator:
                 return await ctx.send("Please give Borealis administrator in order to continue")
 
-            # Create the 'Needed Bots' role
-            needed_bots_role = await ctx.guild.create_role(name="System Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
-            hs_role = await ctx.guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
-            bots_role = await ctx.guild.create_role(name="Bots", permissions=discord.Permissions(view_audit_log=True, create_expressions=True, manage_expressions=True, external_emojis=True, external_stickers=True), color=discord.Color.blurple(), hoist=True)
-
-            await ctx.me.add_roles(needed_bots_role, bots_role)
-            await ctx.author.add_roles(hs_role)
-
-            for m in needed_bots_members:
-                await m.add_roles(needed_bots_role, bots_role)
-
-            welcome_category = await ctx.guild.create_category("Welcome")
-            welcome_channel = await welcome_category.create_text_channel("welcome")
-            invite = await welcome_channel.create_invite(reason="Cache server invite", unique=True, max_uses=0, max_age=0)
-            logs_category = await ctx.guild.create_category('Logging')
-            logs_channel = await logs_category.create_text_channel('system-logs')
-            
-            await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", str(ctx.guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, ctx.guild.name)
-            await ctx.send("Cache server added to database")
-            async with aiohttp.ClientSession() as session:
-                hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
-                await hook.send(content=f"@Bot Reviewers\n\nCache server added: {ctx.guild.name} ({ctx.guild.id}) {invite.url}")
+            return await create_cache_server(ctx.guild)
         else:
             msg = "The following bots have not been added to the server yet:\n"
             
