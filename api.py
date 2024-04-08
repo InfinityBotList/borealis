@@ -70,14 +70,21 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
     # Find a cache server with less than MAX_PER_CACHE_SERVER bots
     available = await bot.pool.fetch("select guild_id, count(*) from cache_server_bots group by guild_id")
 
-    guild_id: str = None
+    guild_id_potentials = []
     for data in available:
         if data["count"] < MAX_PER_CACHE_SERVER:
-            guild_id = data["guild_id"]
-            break
-    
-    if guild_id is None:
+            guild_id_potentials.append({
+                "count": data["count"],
+                "guild_id": data["guild_id"]
+            })
+
+    if not guild_id_potentials:
         raise HTTPException(status_code=500, detail="No available cache servers")
+    
+    # Find potential server with highest count
+    guild_id_potentials.sort(key=lambda x: x["count"], reverse=True)
+
+    guild_id: str = guild_id_potentials[0]["guild_id"]
 
     # Add bot to cache server
     await bot.pool.execute("INSERT INTO cache_server_bots (guild_id, bot_id) VALUES ($1, $2)", guild_id, bot_id)
