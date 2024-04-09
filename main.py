@@ -16,6 +16,7 @@ import io
 import importlib
 import uvicorn
 import aiohttp
+from typing import Callable
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -145,6 +146,39 @@ async def create_cache_server(guild: discord.Guild):
         return True
     else:
         raise Exception(f"The following bots have not been added to the server yet: {', '.join([f'{b.id} ({b.name})' for b in not_yet_added])}")
+
+async def resolve_guilds_from_str(guilds: str, check: Callable[[discord.Guild], bool]):
+    """
+    If guilds is 'all', return all guilds that the bot is in and has kick_members permission
+    """
+    resolved_guilds: list[discord.Guild] = []
+    if guilds == "all":
+        resolved_guilds = [g for g in bot.guilds if check(g)]
+    elif guilds == "cs":
+        db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
+        for g in db_ids:
+            guild = bot.get_guild(int(g["guild_id"]))
+
+            if guild and check(guild):
+                resolved_guilds.append(guild)
+    else:
+        for id in guilds.split(","):
+            id = id.strip()
+
+            guild = None
+            for g in bot.guilds:
+                if id == str(g.id) or id == g.name:
+                    guild = g
+                    break
+                    
+            if not guild:
+                continue
+
+            if guild and check(guild):
+                resolved_guilds.append(guild)
+    
+    return resolved_guilds
+
 
 async def refresh_oauth(cred: dict):
     # Check if expired, if so, refresh access token and update db
@@ -514,7 +548,7 @@ async def kittycat(
         await ctx.send(f"**Positions:** {[f'{usp.id} [{usp.index}]' for usp in usp.user_positions]} with overrides: {usp.perm_overrides}\n\n**Resolved**: ``{' | '.join(resolved)}``")
 
 @bot.hybrid_command()
-async def csreport(ctx: commands.Context, only_file: bool = False):
+async def cs_createreport(ctx: commands.Context, only_file: bool = False):
     """Create report on all cache servers"""
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
@@ -589,7 +623,7 @@ async def get_selected_bots(guild_id: int | str):
     return selected
 
 @bot.hybrid_command()
-async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
+async def cs_bots(ctx: commands.Context, only_show_not_on_server: bool = True):
     """Selects 50 bots for a cache server"""
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
@@ -632,7 +666,7 @@ async def csbots(ctx: commands.Context, only_show_not_on_server: bool = True):
     await ctx.send(f"Total: {len(selected)} bots\nShowing: {showing} bots")
 
 @bot.hybrid_command()
-async def cslist(
+async def cs_list(
     ctx: commands.Context,
 ):
     """Lists all cache servers, their names, their invites and when they were made"""
@@ -863,7 +897,9 @@ async def cs_delete(
 async def cs_leave(
     ctx: commands.Context,
     guilds: str,
+    reason: str,
     user: discord.User | None = commands.parameter(default=None, description="Who to use for leaving. Defaults to author"),
+    ban_user: bool = False
 ):
     """Leaves cache server(s). Use all to remove from all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
     try:
@@ -897,61 +933,36 @@ async def cs_leave(
                 lowest_index_user = p.index
         
         if lowest_index_user <= lowest_index:
-            return await ctx.send("You cannot remove someone with a lower or equal index (higher or equal in hierarchy) than you from cache servers")
+            return await ctx.send("You cannot remove someone with a lower or equal index (higher or equal in hierarchy) than you from cache servers")        
 
-    resolved_guilds: list[int] = []
-    if guilds == "all":
-        resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.kick_members]
-    elif guilds == "cs":
-        db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
-        for g in db_ids:
-            guild = bot.get_guild(int(g["guild_id"]))
-
-            if guild and guild.me.guild_permissions.kick_members:
-                resolved_guilds.append(guild.id)
-    else:
-        for id in guilds.split(","):
-            id = id.strip()
-
-            guild = None
-            for g in bot.guilds:
-                if id == str(g.id) or id == g.name:
-                    guild = g
-                    break
-                    
-            if not guild:
-                continue
-
-            if guild and guild.me.guild_permissions.kick_members:
-                resolved_guilds.append(guild.id)
-        
+    resolved_guilds = await resolve_guilds_from_str(guilds, lambda g: g.me.guild_permissions.ban_members if ban_user else g.me.guild_permissions.kick_members)
 
     if not resolved_guilds:
         return await ctx.send("No servers found")
 
     user = user if user else ctx.author
     for g in resolved_guilds:
-        if g in bot.config.pinned_servers:
+        if g.id in bot.config.pinned_servers:
             continue
 
-        guild = bot.get_guild(g)
-
-        if not guild:
-            continue
-
-        member = guild.get_member(user.id)
+        member = g.get_member(user.id)
 
         if not member:
             continue
             
         # Check if member is higher in hierarchy than me
-        if member.top_role > guild.me.top_role:
-            await ctx.send(f"User {user.id} ({user.name}) is higher in hierarchy than me in guild {guild.id} ({guild.name}), skipping ({member.top_role} >= {guild.me.top_role})")
+        if member.top_role > g.me.top_role:
+            await ctx.send(f"User {user.id} ({user.name}) is higher in hierarchy than me in guild {g.id} ({g.name}), skipping ({member.top_role} >= {g.me.top_role})")
             continue
 
-        await ctx.send(f"Making user {user.id} ({user.name}) leave {guild.id} ({guild.name})")
-        await member.kick(reason="Leaving cache server")
-        await ctx.send(f"Successfully kicked {user.id} ({user.name}) from {guild.id} ({guild.name})")
+        await ctx.send(f"{'Banning' if ban_user else 'Kicking'} user {user.id} ({user.name}) from {g.id} ({g.name})")
+        
+        if ban_user:
+            await member.ban(reason=f"cs_leave: {reason}")
+        else:
+            await member.kick(reason=f"cs_leave: {reason}")
+            
+        await ctx.send(f"Successfully {'banned' if ban_user else 'kicked'} {user.id} ({user.name}) from {g.id} ({g.name})")
         await asyncio.sleep(5)
 
     await ctx.send("Done")
@@ -1002,7 +1013,6 @@ async def cs_oauth_list(
 @bot.hybrid_command()
 async def cs_oauth_add(
     ctx: commands.Context,
-    bypass_checks: bool = False,
 ):
     """Sets up oauth2 for a user"""
     try:
@@ -1038,44 +1048,19 @@ async def cs_oauth_join(
 
     oauth_data = await refresh_oauth(_oauth_data)
 
-    resolved_guilds: list[int] = []
-    if guilds == "all":
-        resolved_guilds = [g.id for g in bot.guilds if g.me.guild_permissions.create_instant_invite]
-    elif guilds == "cs":
-        db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
-        for g in db_ids:
-            guild = bot.get_guild(int(g["guild_id"]))
-
-            if guild and guild.me.guild_permissions.create_instant_invite:
-                resolved_guilds.append(guild.id)
-    else:
-        for id in guilds.split(","):
-            id = id.strip()
-
-            guild = None
-            for g in bot.guilds:
-                if id == str(g.id) or id == g.name:
-                    guild = g
-                    break
-                    
-            if not guild:
-                continue
-
-            if guild and guild.me.guild_permissions.create_instant_invite:
-                resolved_guilds.append(guild.id)
-        
+    resolved_guilds = await resolve_guilds_from_str(guilds, lambda g: g.me.guild_permissions.create_instant_invite)
 
     if not resolved_guilds:
         return await ctx.send("No servers found")
 
     async with aiohttp.ClientSession() as session:
         for g in resolved_guilds:
-            await ctx.send(f"Joining {g}")
+            await ctx.send(f"Joining {g.id} ({g.name})")
 
             data = {
                 "access_token": oauth_data["access_token"],
             }
-            async with session.put(f"https://discord.com/api/v9/guilds/{g}/members/{ctx.author.id}", headers={"Authorization": f"Bot {config.token}"}, json=data) as resp:
+            async with session.put(f"https://discord.com/api/v9/guilds/{g.id}/members/{ctx.author.id}", headers={"Authorization": f"Bot {config.token}"}, json=data) as resp:
                 if not resp.ok:
                     err = await resp.json()
                     await ctx.send(f"Failed to join {g}: {err}")
