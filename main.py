@@ -1082,9 +1082,9 @@ async def cs_oauth_mdset(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    # We use borealis_md to ensure Human Resources etc cannot use metadata commands
-    if not has_perm(resolved, "borealis_md.cs_oauth_mdset"):
-        return await ctx.send("You need ``borealis_md.cs_oauth_mdset`` permission to use this command!")
+    # We use borealis_mgmt to ensure Human Resources etc cannot use metadata commands
+    if not has_perm(resolved, "borealis_mgmt.cs_oauth_mdset"):
+        return await ctx.send("You need ``borealis_mgmt.cs_oauth_mdset`` permission to use this command!")
 
     oauth_v = await bot.pool.fetchval("SELECT user_id from cache_server_oauths WHERE user_id = $1", owner_id)
 
