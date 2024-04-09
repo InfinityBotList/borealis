@@ -153,7 +153,7 @@ async def resolve_guilds_from_str(guilds: str, check: Callable[[discord.Guild], 
     """
     resolved_guilds: list[discord.Guild] = []
     if guilds == "all":
-        resolved_guilds = [g for g in bot.guilds if check(g)]
+        resolved_guilds = [g for g in bot.guilds if check(g) and g.id not in bot.config.pinned_servers]
     elif guilds == "cs":
         db_ids = await bot.pool.fetch("SELECT guild_id from cache_servers")
         for g in db_ids:
