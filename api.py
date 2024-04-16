@@ -59,7 +59,7 @@ async def add_bot_to_cache_server(request: Request, bot_id: str, ignore_bot_type
 
     if cs is not None:
         # Return invite code
-        cache_server = await bot.pool.fetchrow("SELECT invite_code, name FROM cache_servers WHERE guild_id = $1", cache_server)
+        cache_server = await bot.pool.fetchrow("SELECT invite_code, name FROM cache_servers WHERE guild_id = $1", cs)
         return {
             "guild_id": cs, 
             "name": cache_server["name"], 

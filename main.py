@@ -536,10 +536,11 @@ async def db_test(ctx: commands.Context):
 @bot.hybrid_command()
 async def kittycat(
     ctx: commands.Context, 
-    only_show_resolved: bool | None = commands.parameter(default=True, description="Whether to only show resolved permissions or not")
+    only_show_resolved: bool | None = commands.parameter(default=True, description="Whether to only show resolved permissions or not"),
+    user_id: int | None = commands.parameter(default=None, description="Whether to only show resolved permissions or not")
 ):
     """Returns the resolved permissions of the user"""
-    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    usp = await get_user_staff_perms(bot.pool, user_id or ctx.author.id)
     resolved = usp.resolve()
 
     if only_show_resolved:
