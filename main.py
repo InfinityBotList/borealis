@@ -17,6 +17,7 @@ import importlib
 import uvicorn
 import aiohttp
 from typing import Callable
+from PIL import Image, ImageDraw, ImageFont
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -46,6 +47,9 @@ class Config(BaseModel):
 yaml = YAML(typ="safe")
 with open("config.yaml", "r") as f:
     config = Config(**yaml.load(f))
+
+with open("guild_logo.png", "rb") as f:
+    guild_logo = f.read()
 
 class BorealisBot(commands.AutoShardedBot):
     pool: asyncpg.pool.Pool
@@ -78,6 +82,7 @@ async def on_ready():
     ensure_invites.start()
     ensure_cache_servers.start()
     nuke_not_approved.start()
+    ensure_guild_image.start()
     await cache_server_bot.start(config.cache_server_maker.token)
     await bot.tree.sync()
 
@@ -413,6 +418,42 @@ async def nuke_not_approved():
 
             if member:
                 await member.kick(reason="Not approved or certified")
+
+@tasks.loop(minutes=120)
+async def ensure_guild_image():
+    print(f"Starting ensure_guild_image task on {datetime.datetime.now()}")
+
+    for guild in bot.guilds:
+        cache_server_info = await bot.pool.fetchrow("SELECT guild_id from cache_servers WHERE guild_id = $1", str(guild.id))
+
+        if not cache_server_info:
+            continue
+
+        name = guild.name.split("-")[-1]
+
+        try:
+            print("Editing guild logo for", name)
+
+            # Draw name on guild_logo
+            img = Image.open(io.BytesIO(guild_logo))
+            draw = ImageDraw.Draw(img)
+            font = ImageFont.truetype("Roboto-MediumItalic.ttf", 66)
+            draw.text((img.width/8, (2/3)*img.height), name, (10, 10, 10), font=font, stroke_width=1)
+            bio = io.BytesIO()
+            img.save(bio, format="PNG")
+
+            bio.seek(0, 0)
+
+            # Try writing file to disk for validation
+            with open(f"guild_logo_{guild.name}.png", "wb") as f:
+                f.write(bio.read())
+            
+            bio.seek(0, 0)
+
+            await guild.edit(icon=bio.read())
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Failed to edit guild logo for {name}: {e}")
 
 _ensure_cache_server = {} # delete if fail check 3 times
 @tasks.loop(minutes=5)
