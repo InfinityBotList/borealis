@@ -438,7 +438,7 @@ async def ensure_guild_image():
             img = Image.open(io.BytesIO(guild_logo))
             draw = ImageDraw.Draw(img)
             font = ImageFont.truetype("Roboto-MediumItalic.ttf", 66)
-            draw.text((img.width/8, (2/3)*img.height), name, (10, 10, 10), font=font, stroke_width=1)
+            draw.text((img.width/7, (3.75/6)*img.height), name, (10, 10, 10), font=font, stroke_width=1)
             bio = io.BytesIO()
             img.save(bio, format="PNG")
 
