@@ -6,7 +6,7 @@ import secrets
 import datetime
 from kittycat.kittycat import has_perm
 from kittycat.perms import get_user_staff_perms
-from main import config, bot, MAX_PER_CACHE_SERVER
+from main import config, bot, MAX_PER_CACHE_SERVER, handle_member
 
 app = fastapi.FastAPI()
 
@@ -14,7 +14,29 @@ async def check_internal(request: Request):
     print(request.headers)
     if request.headers.get("X-Forwarded-For"):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+@app.post("/handleBotOnAllCacheServers")
+async def handle_bot_on_all_cache_servers(request: Request, bot_id: int):
+    """Handles the user on all cache servers they are on. Internal only"""
+    await check_internal(request)
+
+    cache_server = await bot.pool.fetchval("SELECT guild_id FROM cache_server_bots WHERE bot_id = $1", str(bot_id))
+
+    if cache_server is None:
+        raise HTTPException(status_code=404, detail="Bot not found in any cache server")
     
+    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
+
+    if not cache_server_info:
+        raise HTTPException(status_code=500, detail="Cache server not found despite existing in database")
+
+    member = bot.get_guild(int(cache_server)).get_member(bot_id)
+
+    if member is None:
+        raise HTTPException(status_code=500, detail="Bot not found in cache server")
+
+    await handle_member(member, cache_server_info=cache_server_info)
+
 @app.get("/getCacheServerOfBot")
 async def get_cache_server_of_bot(request: Request, bot_id: str):
     """Returns the cache server of a bot"""
