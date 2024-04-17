@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ruamel.yaml import YAML
 import logging
 import asyncpg
@@ -18,6 +18,7 @@ import uvicorn
 import aiohttp
 from typing import Callable
 from PIL import Image, ImageDraw, ImageFont
+from cfg_autogen import gen_config
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -35,15 +36,35 @@ class CacheServerMaker(BaseModel):
 
 class Config(BaseModel):
     token: str
-    postgres_url: str
-    pinned_servers: list[int]
-    main_server: int
-    needed_bots: list[NeededBots]
+    postgres_url: str = Field(default="postgresql:///infinity")
+    pinned_servers: list[int] = Field(default=[870950609291972618, 758641373074423808])
+    main_server: int = Field(default=758641373074423808)
+    needed_bots: list[NeededBots] = Field(
+        default=[
+            NeededBots(
+                name = "Borealis",
+                id = 1200677946789212242,
+                invite = "https://discord.com/api/oauth2/authorize?client_id={id}&permissions=8&scope=bot%20applications.commands"
+            ),
+            NeededBots(
+                name = "Arcadia",
+                id = 870728078228324382,
+                invite = "https://discord.com/api/oauth2/authorize?client_id={id}&scope=bot%20applications.commands"
+            ),
+            NeededBots(
+                name = "Popplio",
+                id = 815553000470478850,
+                invite = "https://discord.com/api/oauth2/authorize?client_id={id}&scope=bot%20applications.commands"
+            )
+        ]
+    )
     notify_webhook: str
     base_url: str
     cache_server_maker: CacheServerMaker
     borealis_client_id: int
     borealis_client_secret: str
+
+gen_config(Config, 'config.yaml.sample')
 
 yaml = YAML(typ="safe")
 with open("config.yaml", "r") as f:
