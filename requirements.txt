@@ -3,3 +3,5 @@ ruamel.yaml
 pydantic
 asyncpg
 pillow
+uvicorn
+fastapi

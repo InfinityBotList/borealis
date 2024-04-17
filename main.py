@@ -37,6 +37,7 @@ class Config(BaseModel):
     token: str
     postgres_url: str
     pinned_servers: list[int]
+    main_server: int
     needed_bots: list[NeededBots]
     notify_webhook: str
     base_url: str
@@ -83,6 +84,7 @@ async def on_ready():
     ensure_cache_servers.start()
     nuke_not_approved.start()
     ensure_guild_image.start()
+    main_server_kicker.start()
     await cache_server_bot.start(config.cache_server_maker.token)
     await bot.tree.sync()
 
@@ -385,8 +387,32 @@ async def handle_member(member: discord.Member, cache_server_info):
     if bots_role not in member.roles:
         await member.add_roles(bots_role)
 
+async def remove_if_tresspassing(member: discord.Member):
+    """Removes a bot from the main server if it is not premium, certified or explicitly whitelisted"""
+    if member.guild.id != bot.config.main_server:
+        raise Exception("Not main server")
+    
+    whitelist_entry = await bot.pool.fetchval("SELECT COUNT(*) from bot_whitelist WHERE bot_id = $1", str(member.id))
+
+    if whitelist_entry:
+        return
+    
+    bot_entry = await bot.pool.fetchval("SELECT COUNT(*) from bots WHERE bot_id = $1 AND (premium = true OR type = 'certified')", str(member.id))
+
+    if bot_entry:
+        return
+    
+    if member.top_role > member.guild.me.top_role:
+        print("Cant kick", member.name, member.top_role, member.guild.me.top_role)
+    
+    await member.kick(reason="Not premium, certified or whitelisted")
+
 @bot.event
 async def on_member_join(member: discord.Member):
+    if member.guild.id == bot.config.main_server:
+        await remove_if_tresspassing(member)
+        return
+
     cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
     
     if not cache_server_info:
@@ -399,6 +425,19 @@ async def on_member_join(member: discord.Member):
             print(f"Not making cache server for {member.guild.name} ({member.guild.id}) due to reason: {exc}")
     else:
         await handle_member(member, cache_server_info=cache_server_info)
+
+@tasks.loop(minutes=5)
+async def main_server_kicker():
+    print(f"Starting main_server_kicker task on {datetime.datetime.now()}")
+
+    main_server = bot.get_guild(bot.config.main_server)
+
+    if not main_server:
+        return
+    
+    for member in main_server.members:
+        if member.bot:
+            await remove_if_tresspassing(member)
 
 @tasks.loop(minutes=5)
 async def nuke_not_approved():
@@ -451,7 +490,7 @@ async def ensure_guild_image():
             bio.seek(0, 0)
 
             await guild.edit(icon=bio.read())
-            await asyncio.sleep(1)
+            await asyncio.sleep(30)
         except Exception as e:
             print(f"Failed to edit guild logo for {name}: {e}")
 
@@ -1189,7 +1228,9 @@ async def nuke_from_main_server(
         if not bot_obj:
             continue
 
-        if bot_obj.id in [815553000470478850, ctx.me.id]:
+        whitelist_entry = await bot.pool.fetchval("SELECT COUNT(*) from bot_whitelist WHERE bot_id = $1", str(bot_obj.id))
+
+        if whitelist_entry or bot_obj.id == ctx.me.id:
             await ctx.send(f"Skipping {bot_obj.name} ({bot_obj.id})")
             continue # Ignore
 
@@ -1210,7 +1251,9 @@ async def nuke_from_main_server(
         if not bot_obj:
             continue
 
-        if bot_obj.id in [815553000470478850, ctx.me.id]:
+        whitelist_entry = await bot.pool.fetchval("SELECT COUNT(*) from bot_whitelist WHERE bot_id = $1", str(bot_obj.id))
+
+        if whitelist_entry or bot_obj.id == ctx.me.id:
             continue
 
         if not bot_obj.bot:
