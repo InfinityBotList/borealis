@@ -1,7 +1,9 @@
-token:
+token: 
 postgres_url: postgresql:///infinity
 pinned_servers:
   - 870950609291972618
+  - 758641373074423808
+main_server: 758641373074423808
 needed_bots:
   - name: Borealis
     id: 1200677946789212242
@@ -14,3 +16,11 @@ needed_bots:
   - name: Popplio
     id: 815553000470478850
     invite: https://discord.com/api/oauth2/authorize?client_id={id}&scope=bot%20applications.commands
+notify_webhook: https://discord.com/api/webhooks/1226100577436700712/
+cache_server_maker:
+  client_id: 1226404006730141756
+  client_secret: ""
+  token: ""
+base_url: "https://borealis.infinitybots.gg"
+borealis_client_secret: ""
+borealis_client_id: "1200677946789212242"
