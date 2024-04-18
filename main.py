@@ -412,7 +412,10 @@ async def remove_if_tresspassing(member: discord.Member):
     """Removes a bot from the main server if it is not premium, certified or explicitly whitelisted"""
     if member.guild.id != bot.config.main_server:
         raise Exception("Not main server")
-    
+   
+    if not member.bot:
+        raise Exception("Not a bot")
+
     whitelist_entry = await bot.pool.fetchval("SELECT COUNT(*) from bot_whitelist WHERE bot_id = $1", str(member.id))
 
     if whitelist_entry:
@@ -430,7 +433,7 @@ async def remove_if_tresspassing(member: discord.Member):
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    if member.guild.id == bot.config.main_server:
+    if member.guild.id == bot.config.main_server and member.bot:
         await remove_if_tresspassing(member)
         return
 
