@@ -341,79 +341,95 @@ async def handle_member(member: discord.Member, cache_server_info):
             usp = None
         
         if usp and cache_server_info:
+            webmod_role = member.guild.get_role(int(cache_server_info["web_moderator_role"]))
             staff_role = member.guild.get_role(int(cache_server_info["staff_role"]))
-
-            if not staff_role:
-                # Send alert to logs channel
-                logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
-
-                if logs_channel:
-                    await logs_channel.send(f"Failed to find staff role for staff member {member.name} ({member.id}). The staff role currently configured is {cache_server_info['staff_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
+            
+            if not webmod_role:
+                async with aiohttp.ClientSession() as session:
+                    hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
+                    await hook.send(content=f"Failed to find web moderator role for staff member {member.name} ({member.id}). The web moderator role currently configured is {cache_server_info['web_moderator_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
                 return
 
-            if len(usp.user_positions) > 0:
-                # Add staff role
-                if staff_role not in member.roles:
-                    await member.add_roles(staff_role)
-            elif staff_role in member.roles:
-                await member.remove_roles(staff_role) 
+            if not staff_role:
+                async with aiohttp.ClientSession() as session:
+                    hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
+                    await hook.send(content=f"Failed to find staff role for staff member {member.name} ({member.id}). The staff role currently configured is {cache_server_info['staff_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
+                return
 
-        return
+            if len(usp.user_positions) == 0:
+                if staff_role in member.roles:
+                    await member.remove_roles(staff_role)
+                if webmod_role in member.roles:
+                    await member.remove_roles(webmod_role)
+            else:
+                # Add webmod role
+                if webmod_role not in member.roles:
+                    await member.add_roles(webmod_role)
+                
+                resolved_perms = usp.resolve()
+
+                if has_perm(resolved_perms, "borealis.can_have_staff_role"):
+                    if staff_role not in member.roles:
+                        await member.add_roles(staff_role)
+                else:
+                    if staff_role in member.roles:
+                        await member.remove_roles(staff_role)
 
     # If still not found...
     if not cache_server_info:
         # Ignore non-cache servers
         return 
 
-    # Check if the bot is in the needed bots list
-    if str(member.id) in [str(b.id) for b in bot.config.needed_bots]:
-        # Give Needed Bots role and Bots role
-        needed_bots_role = member.guild.get_role(int(cache_server_info["system_bots_role"]))
+    if member.bot:
+        # Check if the bot is in the needed bots list
+        if str(member.id) in [str(b.id) for b in bot.config.needed_bots]:
+            # Give Needed Bots role and Bots role
+            needed_bots_role = member.guild.get_role(int(cache_server_info["system_bots_role"]))
+            bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
+
+            if not needed_bots_role or not bots_role:
+                # Send alert to logs channel
+                logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
+
+                if logs_channel:
+                    await logs_channel.send(f"Failed to find needed roles for needed bot {member.name} ({member.id}). The Needed Bots role currently configured is {cache_server_info['system_bots_role']} and the Bots role is {cache_server_info['bots_role']}. Please verify these roles exist <@&{cache_server_info['staff_role']}>")
+                return
+
+            # Check if said bot has the needed roles
+            if needed_bots_role not in member.roles or bots_role not in member.roles:
+                # Add the roles
+                return await member.add_roles(needed_bots_role, bots_role)
+
+            return
+
+        # Check if this bot has been selected for this cache server
+        count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
+
+        if not count:
+            # Not white-listed, kick it
+            return await member.kick(reason="Not white-listed for cache server")
+        
+        # Also, check that the bot is approved or certified
+        bot_type = await bot.pool.fetchval("SELECT type from bots WHERE bot_id = $1", str(member.id))
+
+        if bot_type and bot_type not in ["approved", "certified"]:
+            # Not approved or certified, kick it
+            await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
+            return await member.kick(reason="Not approved or certified")
+
+        # Add the bot to the Bots role
         bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
 
-        if not needed_bots_role or not bots_role:
+        if not bots_role:
             # Send alert to logs channel
             logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
 
             if logs_channel:
-                await logs_channel.send(f"Failed to find needed roles for needed bot {member.name} ({member.id}). The Needed Bots role currently configured is {cache_server_info['system_bots_role']} and the Bots role is {cache_server_info['bots_role']}. Please verify these roles exist <@&{cache_server_info['staff_role']}>")
+                await logs_channel.send(f"Failed to find Bots role for bot {member.name} ({member.id}). The Bots role currently configured is {cache_server_info['bots_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
             return
 
-        # Check if said bot has the needed roles
-        if needed_bots_role not in member.roles or bots_role not in member.roles:
-            # Add the roles
-            return await member.add_roles(needed_bots_role, bots_role)
-
-        return
-
-    # Check if this bot has been selected for this cache server
-    count = await bot.pool.fetchval("SELECT COUNT(*) from cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
-
-    if not count:
-        # Not white-listed, kick it
-        return await member.kick(reason="Not white-listed for cache server")
-    
-    # Also, check that the bot is approved or certified
-    bot_type = await bot.pool.fetchval("SELECT type from bots WHERE bot_id = $1", str(member.id))
-
-    if bot_type and bot_type not in ["approved", "certified"]:
-        # Not approved or certified, kick it
-        await bot.pool.execute("DELETE FROM cache_server_bots WHERE guild_id = $1 AND bot_id = $2", str(member.guild.id), str(member.id))
-        return await member.kick(reason="Not approved or certified")
-
-    # Add the bot to the Bots role
-    bots_role = member.guild.get_role(int(cache_server_info["bots_role"]))
-
-    if not bots_role:
-        # Send alert to logs channel
-        logs_channel = member.guild.get_channel(int(cache_server_info["logs_channel"]))
-
-        if logs_channel:
-            await logs_channel.send(f"Failed to find Bots role for bot {member.name} ({member.id}). The Bots role currently configured is {cache_server_info['bots_role']}. Please verify this role exists <@&{cache_server_info['staff_role']}>")
-        return
-
-    if bots_role not in member.roles:
-        await member.add_roles(bots_role)
+        if bots_role not in member.roles:
+            await member.add_roles(bots_role)
 
 async def remove_if_tresspassing(member: discord.Member):
     """Removes a bot from the main server if it is not premium, certified or explicitly whitelisted"""
@@ -444,7 +460,7 @@ async def on_member_join(member: discord.Member):
         await remove_if_tresspassing(member)
         return
 
-    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
+    cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role, web_moderator_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
     
     if not cache_server_info:
         try:
@@ -595,7 +611,7 @@ async def validate_members():
     """Task to validate all members every 5 minutes"""
     print(f"Starting validate_members task on {datetime.datetime.now()}")
     for guild in bot.guilds:
-        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role, name from cache_servers WHERE guild_id = $1", str(guild.id))
+        cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role, web_moderator_role, name from cache_servers WHERE guild_id = $1", str(guild.id))
 
         if not cache_server_info:
             if guild.id in bot.config.pinned_servers:
@@ -733,6 +749,55 @@ async def get_selected_bots(guild_id: int | str):
         selected = selected[remove_amount:]
     
     return selected
+
+@bot.hybrid_command()
+async def cs_allbots(
+    ctx: commands.Context, 
+    only_show_not_on_server: bool = True,
+    only_send_servers_with_needed_action: bool = True
+):
+    """Partitions all bots and sends"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.csallbots"):
+        return await ctx.send("You need ``borealis.csallbots`` permission to use this command!")
+
+    for guild in bot.guilds:
+        # Check if a cache server
+        is_cache_server = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(guild.id))
+
+        if not is_cache_server:
+            continue
+            
+        msg = f"**Cache server: {guild.name} ({guild.id})**"
+
+        # Check currently selected too
+        selected = await get_selected_bots(guild.id)
+
+        msg += "\nSelected bots:\n"
+
+        showing = 0
+        for b in selected:
+            if only_show_not_on_server:
+                # Check if in server
+                in_server = guild.get_member(int(b["bot_id"]))
+                if in_server:
+                    continue
+            
+            showing += 1
+
+            name = await bot.pool.fetchval("SELECT username from internal_user_cache__discord WHERE id = $1", b["bot_id"])
+            client_id = await bot.pool.fetchval("SELECT client_id from bots WHERE bot_id = $1", b["bot_id"])
+            msg += f"\n- {name} [{b['bot_id']}]: https://discord.com/api/oauth2/authorize?client_id={client_id or b['bot_id']}&guild_id={guild.id}&scope=bot ({b['added']}, {b['created_at']})"
+
+            if len(msg) >= 1500:
+                await ctx.send(msg)
+                msg = ""
+
+        if showing or not only_send_servers_with_needed_action:
+            msg += f"\nTotal: {len(selected)} bots\nShowing: {showing} bots"
+            await ctx.send(msg)
 
 @bot.hybrid_command()
 async def cs_bots(ctx: commands.Context, only_show_not_on_server: bool = True):
