@@ -20,6 +20,7 @@ from typing import Callable
 from PIL import Image, ImageDraw, ImageFont
 from cfg_autogen import gen_config
 from migrations import MIGRATION_LIST, Migration
+from constants import BOTS_ROLE_PERMS
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -151,7 +152,8 @@ async def create_cache_server(guild: discord.Guild):
         # Create the 'Needed Bots' role
         needed_bots_role = await guild.create_role(name="System Bots", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
         hs_role = await guild.create_role(name="Holding Staff", permissions=discord.Permissions(administrator=True), color=discord.Color.blurple(), hoist=True)
-        bots_role = await guild.create_role(name="Bots", permissions=discord.Permissions(view_audit_log=True, create_expressions=True, manage_expressions=True, external_emojis=True, external_stickers=True), color=discord.Color.blurple(), hoist=True)
+        webmod_role = await guild.create_role(name="Web Moderator", permissions=discord.Permissions(manage_guild=True, kick_members=True, ban_members=True, moderate_members=True), color=discord.Color.green(), hoist=True)
+        bots_role = await guild.create_role(name="Bots", permissions=BOTS_ROLE_PERMS, color=discord.Color.brand_red(), hoist=True)
 
         await guild.me.add_roles(needed_bots_role, bots_role)
 
@@ -164,13 +166,13 @@ async def create_cache_server(guild: discord.Guild):
         logs_category = await guild.create_category('Logging')
         logs_channel = await logs_category.create_text_channel('system-logs')
         
-        await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", str(guild.id), str(bots_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, guild.name)
+        await bot.pool.execute("INSERT INTO cache_servers (guild_id, bots_role, web_moderator_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code, name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", str(guild.id), str(bots_role.id), str(webmod_role.id), str(needed_bots_role.id), str(logs_channel.id), str(hs_role.id), str(welcome_channel.id), invite.code, guild.name)
         async with aiohttp.ClientSession() as session:
             hook = discord.Webhook.from_url(bot.config.notify_webhook, session=session)
             await hook.send(content=f"@Bot Reviewers\n\nCache server added: {guild.name} ({guild.id}) {invite.url}")
 
         for member in guild.members:
-            await handle_member(member, cache_server_info={"bots_role": bots_role.id, "system_bots_role": needed_bots_role.id, "logs_channel": logs_channel.id, "staff_role": hs_role.id})
+            await handle_member(member, cache_server_info={"bots_role": bots_role.id, "web_moderator_role": str(webmod_role.id), "system_bots_role": needed_bots_role.id, "logs_channel": logs_channel.id, "staff_role": hs_role.id})
 
         return True
     else:
@@ -212,25 +214,29 @@ async def resolve_guilds_from_str(guilds: str, check: Callable[[discord.Guild], 
 async def refresh_oauth(cred: dict):
     # Check if expired, if so, refresh access token and update db
     if cred["expires_at"] < datetime.datetime.now(tz=datetime.timezone.utc):
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
         data = {
             "grant_type": "refresh_token",
             "refresh_token": cred["refresh_token"],
-            "client_id": config.cache_server_maker.client_id,
-            "client_secret": config.cache_server_maker.client_secret,
+            "client_id": config.borealis_client_id if cred["bot"] == "borealis" else config.cache_server_maker.client_id,
+            "client_secret": config.borealis_client_secret if cred["bot"] == "borealis" else config.cache_server_maker.client_secret,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{bot.config.base_url}/api/v10/oauth2/token", data=data) as resp:
-                if resp.status != 200:
-                    raise Exception(f"Failed to refresh token for {cred['user_id']}")
-                
-                data = await resp.json()
-                await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
+        print(data)
+        async with bot.session.post(f"https://discord.com/api/v10/oauth2/token", data=data, headers=headers) as resp:
+            if resp.status != 200:
+                err = await resp.text()
+                raise Exception(f"Failed to refresh token for {cred['user_id']} {resp.status} {err}")
+            
+            data = await resp.json()
+            await bot.pool.execute("UPDATE cache_server_oauths SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE user_id = $4", data["access_token"], data["refresh_token"], datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"]), cred["user_id"])
 
-            return {
-                "user_id": cred["user_id"],
-                "access_token": data["access_token"],
-                "refresh_token": data["refresh_token"],
-            }
+        return {
+            "user_id": cred["user_id"],
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+        }
     
     return {
         "user_id": cred["user_id"], 
@@ -246,7 +252,7 @@ async def create_unprovisioned_cache_server():
     if not oauth_md:
         raise Exception("Oauth metadata not setup, please run #cs_oauth_mdset to set owner id for new cache servers")
     
-    _oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths WHERE bot = 'doxycycline'")
+    _oauth_creds = await bot.pool.fetch("SELECT user_id, access_token, refresh_token, expires_at, bot from cache_server_oauths WHERE bot = 'doxycycline'")
 
     oauth_creds = []
     for cred in _oauth_creds:
@@ -1079,6 +1085,19 @@ async def cs_migrate(
     guilds: str = "all",
 ):  
     """Apply migrations to cache servers"""
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        usp = StaffPermissions(user_positions=[], perm_overrides=[])
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
+
+    if not has_perm(resolved, "service_account.marker"):
+        return await ctx.send("You need ``service_account.marker`` permission to perform migrations!")
+
     guilds_split = []
 
     if guilds != "all":
@@ -1125,7 +1144,10 @@ async def cs_migrate(
             
             await migration_cls.run_one(guild)
 
-            await bot.pool.execute("UPDATE cache_server_migrations SET state = $1 WHERE guild_id = $2 AND migration_id = $3", ["done"], str(guild.id), migration_cls.id())
+            try:
+                await bot.pool.execute("INSERT INTO cache_server_migrations_done (migration_id, states) VALUES ($1, $2)", migration_cls.id(), ["done"])
+            except asyncpg.exceptions.UniqueViolationError:
+                await bot.pool.execute("UPDATE cache_server_migrations SET state = $1 WHERE guild_id = $2 AND migration_id = $3", ["done"], str(guild.id), migration_cls.id())
 
             await ctx.send(f"Migration {migration_cls.id()} applied on {guild.id} ({guild.name})")
         
@@ -1147,19 +1169,28 @@ async def cs_migration_rollback(
     guilds: str = "all"
 ):
     """Rollback a database migration"""
-    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
-    resolved = usp.resolve()
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        usp = StaffPermissions(user_positions=[], perm_overrides=[])
+        resolved = []
+    
+    if not resolved:
+        return await ctx.send("User is not a staff member")
 
-    if not has_perm(resolved, "borealis.cs_migration_dbrollback"):
-        return await ctx.send("You need ``borealis.cs_migration_dbrollback`` permission to use this command!")
+    if not has_perm(resolved, "service_account.marker"):
+        return await ctx.send("You need ``service_account.marker`` permission to perform migrations!")
 
-    migration_cls = None
+
+    migration_cls: Migration | None = None
     for migration in MIGRATION_LIST:
-        migration_cls = migration(
+        cls = migration(
             pool=bot.pool,
             ctx=ctx
         )
-        if migration_cls.id() == migration_id:
+        if cls.id() == migration_id:
+            migration_cls = cls
             break
 
     if not migration_cls:
@@ -1185,13 +1216,13 @@ async def cs_migration_rollback(
         if guilds != "all" and str(guild.id) not in guilds_split:
             continue
 
-        mig_entry = await bot.pool.fetchrow("SELECT state from cache_server_migrations WHERE guild_id = $1 AND migration_id = $2", str(cs["guild_id"]), migration_id)
+        #mig_entry = await bot.pool.fetchrow("SELECT state from cache_server_migrations WHERE guild_id = $1 AND migration_id = $2", str(cs["guild_id"]), migration_id)
 
-        if not mig_entry:
-            continue
+        #if not mig_entry:
+        #    continue
         
-        if "done" not in mig_entry["state"]:
-            await ctx.send(f"Migration {migration_id} not fully applied on {cs['guild_id']}, errors may occur!")
+        #if "done" not in mig_entry["state"]:
+        #    await ctx.send(f"Migration {migration_id} not fully applied on {cs['guild_id']}, errors may occur!")
 
         await ctx.send(f"Rolling back migration {migration_id} on {cs['guild_id']} ({guild.name})")
         await migration_cls.rollback(guild)
@@ -1278,7 +1309,7 @@ async def cs_oauth_join(
     if not resolved:
         return await ctx.send("User is not a staff member")
 
-    _oauth_data = await bot.pool.fetchrow("SELECT user_id, access_token, refresh_token, expires_at from cache_server_oauths WHERE user_id = $1 AND bot = 'borealis'", str(ctx.author.id))
+    _oauth_data = await bot.pool.fetchrow("SELECT user_id, access_token, refresh_token, expires_at, bot from cache_server_oauths WHERE user_id = $1 AND bot = 'borealis'", str(ctx.author.id))
 
     if not _oauth_data:
         return await ctx.send("User has not authorized to oauth2 yet *for borealis*, use ``cs_oauth_add`` to do so")
