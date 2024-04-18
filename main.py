@@ -19,6 +19,7 @@ import aiohttp
 from typing import Callable
 from PIL import Image, ImageDraw, ImageFont
 from cfg_autogen import gen_config
+from migrations import MIGRATION_LIST, Migration
 
 MAX_PER_CACHE_SERVER = 40
 
@@ -1073,6 +1074,137 @@ async def cs_leave(
     await ctx.send("Done")
 
 @bot.hybrid_command()
+async def cs_migrate(
+    ctx: commands.Context,
+    guilds: str = "all",
+):  
+    """Apply migrations to cache servers"""
+    guilds_split = []
+
+    if guilds != "all":
+        guilds_split = guilds.split(",")
+        for i in range(len(guilds_split)):
+            guilds_split[i] = guilds_split[i].strip()
+
+    for migration in MIGRATION_LIST:
+        migration_cls: Migration = migration(
+            pool=bot.pool,
+            ctx=ctx
+        )
+
+        migrations_applied = await bot.pool.fetchval("SELECT states from cache_server_migrations_done WHERE migration_id = $1", migration_cls.id())
+
+        if migrations_applied and "done" in migrations_applied:
+            continue
+
+        if not migrations_applied:
+            await migration_cls.database_migration_func()
+            await bot.pool.execute("INSERT INTO cache_server_migrations_done (migration_id, states) VALUES ($1, $2)", migration_cls.id(), ["db_done"])
+
+        cache_servers = await bot.pool.fetch("SELECT guild_id from cache_servers")
+
+        for cs in cache_servers:
+            guild = bot.get_guild(int(cs["guild_id"]))
+
+            if not guild:
+                continue
+
+            if guilds != "all" and str(guild.id) not in guilds_split:
+                continue
+            
+            current_migration_data = await bot.pool.fetchrow("SELECT state from cache_server_migrations WHERE guild_id = $1 AND migration_id = $2", str(guild.id), migration_cls.id())
+
+            if not current_migration_data:
+                await bot.pool.execute("INSERT INTO cache_server_migrations (guild_id, migration_id, state) VALUES ($1, $2, $3)", str(guild.id), migration_cls.id(), [])
+                current_migration_data = {"state": []}
+
+            if current_migration_data and "done" in current_migration_data["state"]:
+                continue
+
+            await ctx.send(f"Applying migration {migration_cls.id()} on {guild.id} ({guild.name})")
+            
+            await migration_cls.run_one(guild)
+
+            await bot.pool.execute("UPDATE cache_server_migrations SET state = $1 WHERE guild_id = $2 AND migration_id = $3", ["done"], str(guild.id), migration_cls.id())
+
+            await ctx.send(f"Migration {migration_cls.id()} applied on {guild.id} ({guild.name})")
+        
+        if guilds == "all":
+            await migration_cls.finish()
+            try:
+                await bot.pool.execute("INSERT INTO cache_server_migrations_done (migration_id) VALUES ($1)", migration_cls.id())
+            except asyncpg.exceptions.UniqueViolationError:
+                await bot.pool.execute("UPDATE cache_server_migrations_done SET states = states || $1 WHERE migration_id = $2", ["done"], migration_cls.id())
+            await ctx.send(f"Migration {migration_cls.id()} applied on all cache servers")
+        else:
+            await ctx.send(f"Migration {migration_cls.id()} applied on specified cache servers")
+    await ctx.send("Done")
+
+@bot.hybrid_command()
+async def cs_migration_rollback(
+    ctx: commands.Context,
+    migration_id: str,
+    guilds: str = "all"
+):
+    """Rollback a database migration"""
+    usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+    resolved = usp.resolve()
+
+    if not has_perm(resolved, "borealis.cs_migration_dbrollback"):
+        return await ctx.send("You need ``borealis.cs_migration_dbrollback`` permission to use this command!")
+
+    migration_cls = None
+    for migration in MIGRATION_LIST:
+        migration_cls = migration(
+            pool=bot.pool,
+            ctx=ctx
+        )
+        if migration_cls.id() == migration_id:
+            break
+
+    if not migration_cls:
+        return await ctx.send("Migration not found")
+
+    await bot.pool.execute("DELETE FROM cache_server_migrations_done WHERE migration_id = $1", migration_id)
+
+    guilds_split = []
+
+    if guilds != "all":
+        guilds_split = guilds.split(",")
+        for i in range(len(guilds_split)):
+            guilds_split[i] = guilds_split[i].strip()
+
+    cache_servers = await bot.pool.fetch("SELECT guild_id from cache_servers")
+
+    for cs in cache_servers:
+        guild = bot.get_guild(int(cs["guild_id"]))
+
+        if not guild:
+            continue
+
+        if guilds != "all" and str(guild.id) not in guilds_split:
+            continue
+
+        mig_entry = await bot.pool.fetchrow("SELECT state from cache_server_migrations WHERE guild_id = $1 AND migration_id = $2", str(cs["guild_id"]), migration_id)
+
+        if not mig_entry:
+            continue
+        
+        if "done" not in mig_entry["state"]:
+            await ctx.send(f"Migration {migration_id} not fully applied on {cs['guild_id']}, errors may occur!")
+
+        await ctx.send(f"Rolling back migration {migration_id} on {cs['guild_id']} ({guild.name})")
+        await migration_cls.rollback(guild)
+        await bot.pool.execute("DELETE FROM cache_server_migrations WHERE migration_id = $1", migration_id)
+        await ctx.send(f"Migration {migration_id} rolled back on {cs['guild_id']} ({guild.name})")
+
+    if guilds == "all":
+        await migration_cls.finish_rollback()
+        await ctx.send(f"Migration {migration_id} rolled back on all cache servers")
+    else:
+        await ctx.send("Migration rolled back")
+
+@bot.hybrid_command()
 async def cs_oauth_list(
     ctx: commands.Context
 ):
@@ -1299,7 +1431,6 @@ async def nuke_from_main_server(
 
         if not view.done:
             return await ctx.send("Timed out")
-
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()

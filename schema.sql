@@ -11,6 +11,18 @@ CREATE TABLE public.cache_servers (
     created_at timestamptz not null default now()
 );
 
+create table public.cache_server_migrations (
+    guild_id text not null,
+    migration_id text not null,
+    created_at timestamptz not null default now(),
+    UNIQUE (guild_id, migration_id)
+);
+
+create table public.cache_server_migrations_done (
+    migration_id text primary key,
+    created_at timestamptz not null default now()
+);
+
 ALTER TABLE ONLY public.cache_servers ADD CONSTRAINT cache_servers_pkey PRIMARY KEY (guild_id);
 
 -- Bots
