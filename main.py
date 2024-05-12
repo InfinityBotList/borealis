@@ -5,8 +5,8 @@ from ruamel.yaml import YAML
 import logging
 import asyncpg
 import asyncio
-from kittycat.perms import get_user_staff_perms
-from kittycat.kittycat import StaffPermissions, has_perm
+from perms import get_user_staff_perms
+from kittycat import StaffPermissions, has_perm, Permission
 import secrets
 import traceback
 import sys
@@ -98,18 +98,21 @@ intents = discord.Intents.all()
 bot = BorealisBot(config)
 cache_server_bot = discord.Client(intents=discord.Intents.all())
 
+have_started_events = False
+
 # On ready handler
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
-    validate_members.start()
-    ensure_invites.start()
-    ensure_cache_servers.start()
-    nuke_not_approved.start()
-    ensure_guild_image.start()
-    main_server_kicker.start()
-    await cache_server_bot.start(config.cache_server_maker.token)
-    await bot.tree.sync()
+    if not have_started_events:
+        validate_members.start()
+        ensure_invites.start()
+        ensure_cache_servers.start()
+        nuke_not_approved.start()
+        ensure_guild_image.start()
+        main_server_kicker.start()
+        await cache_server_bot.start(config.cache_server_maker.token)
+        await bot.tree.sync()
 
 @cache_server_bot.event
 async def on_ready():
@@ -259,7 +262,7 @@ async def create_unprovisioned_cache_server():
         usp = await get_user_staff_perms(bot.pool, int(cred["user_id"]))
         resolved = usp.resolve()
 
-        if not has_perm(resolved, "borealis.make_cache_servers"):
+        if not has_perm(resolved, Permission.from_str("borealis.make_cache_servers")):
             continue # Don't add this user
 
         oauth_creds.append(await refresh_oauth(cred))
@@ -368,7 +371,7 @@ async def handle_member(member: discord.Member, cache_server_info):
                 
                 resolved_perms = usp.resolve()
 
-                if has_perm(resolved_perms, "borealis.can_have_staff_role"):
+                if has_perm(resolved_perms, Permission.from_str("borealis.can_have_staff_role")):
                     if staff_role not in member.roles:
                         await member.add_roles(staff_role)
                 else:
@@ -668,7 +671,7 @@ async def kittycat(
 ):
     """Returns the resolved permissions of the user"""
     usp = await get_user_staff_perms(bot.pool, user_id or ctx.author.id)
-    resolved = usp.resolve()
+    resolved = [str(p) for p in usp.resolve()]
 
     if only_show_resolved:
         await ctx.send(f"**Resolved**: ``{' | '.join(resolved)}``")
@@ -681,7 +684,7 @@ async def cs_createreport(ctx: commands.Context, only_file: bool = False):
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.csreport"):
+    if not has_perm(resolved, Permission.from_str("borealis.csreport")):
         return await ctx.send("You need ``borealis.csreport`` permission to use this command!")
 
     servers = await bot.pool.fetch("SELECT guild_id, bots_role, system_bots_role, logs_channel, staff_role, welcome_channel, invite_code from cache_servers")
@@ -760,7 +763,7 @@ async def cs_allbots(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.csallbots"):
+    if not has_perm(resolved, Permission.from_str("borealis.csallbots")):
         return await ctx.send("You need ``borealis.csallbots`` permission to use this command!")
 
     for guild in bot.guilds:
@@ -805,7 +808,7 @@ async def cs_bots(ctx: commands.Context, only_show_not_on_server: bool = True):
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.csbots"):
+    if not has_perm(resolved, Permission.from_str("borealis.csbots")):
         return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
 
     # Check if a cache server
@@ -850,7 +853,7 @@ async def cs_list(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.cslist"):
+    if not has_perm(resolved, Permission.from_str("borealis.cslist")):
         return await ctx.send("You need ``borealis.cslist`` permission to use this command!")
 
     servers = await bot.pool.fetch("SELECT guild_id, invite_code, name, created_at from cache_servers")
@@ -881,7 +884,7 @@ async def cs_mark_uninvitable(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.csbots"):
+    if not has_perm(resolved, Permission.from_str("borealis.csbots")):
         return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
 
     # Check if a cache server
@@ -909,7 +912,7 @@ async def cs_unmark_uninvitable(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.csbots"):
+    if not has_perm(resolved, Permission.from_str("borealis.csbots")):
         return await ctx.send("You need ``borealis.csbots`` permission to use this command!")
 
     # Check if a cache server
@@ -975,7 +978,7 @@ async def make_cache_server(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.make_cache_servers"):
+    if not has_perm(resolved, Permission.from_str("borealis.make_cache_servers")):
         return await ctx.send("You need ``borealis.make_cache_servers`` permission to use this command!")
 
     existing = await bot.pool.fetchval("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", str(ctx.guild.id))
@@ -1051,7 +1054,7 @@ async def cs_delete(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.cs_delete"):
+    if not has_perm(resolved, Permission.from_str("borealis.cs_delete")):
         return await ctx.send("You need ``borealis.cs_delete`` permission to use this command!")
 
     cs_data = await bot.pool.fetchrow("SELECT COUNT(*) from cache_servers WHERE guild_id = $1", guild_id or str(ctx.guild.id))
@@ -1090,7 +1093,7 @@ async def cs_leave(
         return await ctx.send("User is not a staff member")
 
     if user:
-        if not has_perm(resolved, "borealis.cs_leave_other"):
+        if not has_perm(resolved, Permission.from_str("borealis.cs_leave_other")):
             return await ctx.send("You need ``borealis.cs_leave_other`` permission to remove other people from cache servers!")
 
         # Check if member has lower index than us, if so then error
@@ -1160,7 +1163,7 @@ async def cs_migrate(
     if not resolved:
         return await ctx.send("User is not a staff member")
 
-    if not has_perm(resolved, "service_account.marker"):
+    if not has_perm(resolved, Permission.from_str("service_account.marker")):
         return await ctx.send("You need ``service_account.marker`` permission to perform migrations!")
 
     guilds_split = []
@@ -1244,7 +1247,7 @@ async def cs_migration_rollback(
     if not resolved:
         return await ctx.send("User is not a staff member")
 
-    if not has_perm(resolved, "service_account.marker"):
+    if not has_perm(resolved, Permission.from_str("service_account.marker")):
         return await ctx.send("You need ``service_account.marker`` permission to perform migrations!")
 
 
@@ -1326,7 +1329,7 @@ async def cs_oauth_list(
         except:
             resolved = []
 
-        service_account = has_perm(resolved, "service_account.marker")
+        service_account = has_perm(resolved, Permission.from_str("service_account.marker"))
 
         user = bot.get_user(int(o["user_id"]))
 
@@ -1416,7 +1419,7 @@ async def cs_oauth_mdset(
     resolved = usp.resolve()
 
     # We use borealis_mgmt to ensure Human Resources etc cannot use metadata commands
-    if not has_perm(resolved, "borealis_mgmt.cs_oauth_mdset"):
+    if not has_perm(resolved, Permission.from_str("borealis_mgmt.cs_oauth_mdset")):
         return await ctx.send("You need ``borealis_mgmt.cs_oauth_mdset`` permission to use this command!")
 
     oauth_v = await bot.pool.fetchval("SELECT user_id from cache_server_oauths WHERE user_id = $1", owner_id)
@@ -1442,7 +1445,7 @@ async def nuke_from_main_server(
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
     resolved = usp.resolve()
 
-    if not has_perm(resolved, "borealis.nuke_from_main_server"):
+    if not has_perm(resolved, Permission.from_str("borealis.nuke_from_main_server")):
         return await ctx.send("You need ``borealis.nuke_from_main_server`` permission to use this command!")
 
     if guild_id not in config.pinned_servers:

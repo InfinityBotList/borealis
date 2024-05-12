@@ -5,3 +5,4 @@ asyncpg
 pillow
 uvicorn
 fastapi
+infinitybots-kittycat

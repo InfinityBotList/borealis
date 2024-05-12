@@ -1,5 +1,5 @@
 import asyncpg
-from .kittycat import PartialStaffPosition, StaffPermissions
+from kittycat import PartialStaffPosition, StaffPermissions, Permission
 
 async def get_user_staff_perms(pool: asyncpg.Pool, user_id: int) -> StaffPermissions:
     user_poses = await pool.fetchrow("SELECT positions, perm_overrides FROM staff_members WHERE user_id = $1", str(user_id))
@@ -13,7 +13,7 @@ async def get_user_staff_perms(pool: asyncpg.Pool, user_id: int) -> StaffPermiss
     position_data = await pool.fetch("SELECT id::text, index, perms FROM staff_positions WHERE id = ANY($1)", user_poses["positions"])
 
     sp = StaffPermissions(
-        perm_overrides=user_poses["perm_overrides"],
+        perm_overrides=Permission.from_str_list(user_poses["perm_overrides"]),
         user_positions=[]
     )
 
@@ -22,7 +22,7 @@ async def get_user_staff_perms(pool: asyncpg.Pool, user_id: int) -> StaffPermiss
             PartialStaffPosition(
                 id=pos["id"],
                 index=pos["index"],
-                perms=pos["perms"]
+                perms=Permission.from_str_list(pos["perms"])
             )
         )
     
