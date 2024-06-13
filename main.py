@@ -99,20 +99,39 @@ bot = BorealisBot(config)
 cache_server_bot = discord.Client(intents=discord.Intents.all())
 
 have_started_events = False
-
+bot_tasks = []
 # On ready handler
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
     if not have_started_events:
-        validate_members.start()
-        ensure_invites.start()
-        ensure_cache_servers.start()
-        nuke_not_approved.start()
-        ensure_guild_image.start()
-        main_server_kicker.start()
+        bot_tasks.extend(
+            [
+                validate_members,
+                ensure_invites,
+                ensure_cache_servers,
+                nuke_not_approved,
+                ensure_guild_image,
+                main_server_kicker,
+                task_fail_check,
+            ]
+        )
+
+        for t in bot_tasks:
+            t.add_exception_type(Exception)
+            t.start()
+
         await cache_server_bot.start(config.cache_server_maker.token)
         await bot.tree.sync()
+
+@tasks.loop(seconds=10)
+async def task_fail_check():
+    for task in bot_tasks:
+        if task.failed():
+            print(f"task_fail_check: Task has failed {task}, restarting")
+            task.cancel()
+            task.start()
+            print(f"task_fail_check: Restarted task {task}")
 
 @cache_server_bot.event
 async def on_ready():
@@ -452,7 +471,7 @@ async def remove_if_tresspassing(member: discord.Member):
     if bot_entry:
         return
     
-    if member.top_role > member.guild.me.top_role:
+    if member.top_role >= member.guild.me.top_role:
         print("Cant kick", member.name, member.top_role, member.guild.me.top_role)
     
     await member.kick(reason="Not premium, certified or whitelisted")
@@ -460,7 +479,10 @@ async def remove_if_tresspassing(member: discord.Member):
 @bot.event
 async def on_member_join(member: discord.Member):
     if member.guild.id == bot.config.main_server and member.bot:
-        await remove_if_tresspassing(member)
+        try:
+            await remove_if_tresspassing(member)
+        except Exception as exc:
+            print(f"on_member_join [bot_tresspass_check] (id={member},{member.id}) {exc}")
         return
 
     cache_server_info = await bot.pool.fetchrow("SELECT bots_role, system_bots_role, logs_channel, staff_role, web_moderator_role from cache_servers WHERE guild_id = $1", str(member.guild.id))
@@ -483,11 +505,15 @@ async def main_server_kicker():
     main_server = bot.get_guild(bot.config.main_server)
 
     if not main_server:
+        print("Bot could not find main server")
         return
     
     for member in main_server.members:
         if member.bot:
-            await remove_if_tresspassing(member)
+            try:
+                await remove_if_tresspassing(member)
+            except Exception as exc:
+                print(f"main_server_kicker (bot_id={member},{member.id}) {exc}")
 
 @tasks.loop(minutes=5)
 async def nuke_not_approved():
