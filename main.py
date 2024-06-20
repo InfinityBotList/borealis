@@ -472,7 +472,7 @@ async def handle_member(member: discord.Member, cache_server_info):
             await member.add_roles(bots_role)
 
 async def remove_if_tresspassing(member: discord.Member):
-    """Removes a bot from the main server if it is not premium, certified or explicitly whitelisted"""
+    """Removes a bot from the main server if it is not premium, certified or explicitly whitelisted or a partner"""
     if member.guild.id != bot.config.main_server:
         raise Exception("Not main server")
    
@@ -489,6 +489,12 @@ async def remove_if_tresspassing(member: discord.Member):
     if bot_entry:
         return
     
+    # Partner check
+    partner_entry = await bot.pool.fetchval("SELECT COUNT(*) FROM partners WHERE bot_id = $1", str(member.id))
+
+    if partner_entry:
+        return
+
     if member.top_role >= member.guild.me.top_role:
         print("Cant kick", member.name, member.top_role, member.guild.me.top_role)
     
