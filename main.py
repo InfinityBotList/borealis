@@ -106,8 +106,6 @@ bot_tasks = []
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
     if not have_started_events:
-        await bot.tree.sync()
-        
         bot_tasks.extend(
             [
                 validate_members,
@@ -123,6 +121,24 @@ async def on_ready():
         for t in bot_tasks:
             t.add_exception_type(Exception)
             t.start()
+
+@bot.command()
+async def register(ctx: commands.Context):
+    try:
+        usp = await get_user_staff_perms(bot.pool, ctx.author.id)
+        resolved = usp.resolve()
+    except:
+        usp = StaffPermissions(user_positions=[], perm_overrides=[])
+        resolved = []
+
+    if not resolved:
+        return await ctx.send("User is not a staff member")
+
+    if not has_perm(resolved, Permission.from_str("borealis.register")):
+        return await ctx.send("You need ``borealis.register`` permission to perform migrations!")
+
+    await bot.tree.sync()
+    await ctx.send("Done!")
 
 @tasks.loop(seconds=10)
 async def task_fail_check():
@@ -202,7 +218,9 @@ async def create_cache_server(guild: discord.Guild):
 
 async def resolve_guilds_from_str(guilds: str, check: Callable[[discord.Guild], bool]):
     """
-    If guilds is 'all', return all guilds that the bot is in and has kick_members permission
+    If guilds is 'all', return all guilds that the bot is in and passes check(g)
+    If guilds is 'cs', then return all cache servers the bot is in and passes check(g)
+    Otherwise, returns all guilds from the comma seperated list that passes check(g)
     """
     resolved_guilds: list[discord.Guild] = []
     if guilds == "all":
@@ -509,7 +527,7 @@ async def main_server_kicker():
         return
     
     for member in main_server.members:
-        if member.bot:
+        if member.bot and member.id != bot.user.id:
             try:
                 await remove_if_tresspassing(member)
             except Exception as exc:
@@ -782,8 +800,8 @@ async def get_selected_bots(guild_id: int | str):
 @bot.hybrid_command()
 async def cs_allbots(
     ctx: commands.Context, 
-    only_show_not_on_server: bool = True,
-    only_send_servers_with_needed_action: bool = True
+    only_not_on_server: bool = True,
+    only_unfilled_servers: bool = True
 ):
     """Partitions all bots and sends"""
     usp = await get_user_staff_perms(bot.pool, ctx.author.id)
@@ -808,7 +826,7 @@ async def cs_allbots(
 
         showing = 0
         for b in selected:
-            if only_show_not_on_server:
+            if only_not_on_server:
                 # Check if in server
                 in_server = guild.get_member(int(b["bot_id"]))
                 if in_server:
@@ -824,7 +842,7 @@ async def cs_allbots(
                 await ctx.send(msg)
                 msg = ""
 
-        if showing or not only_send_servers_with_needed_action:
+        if showing or not only_unfilled_servers:
             msg += f"\nTotal: {len(selected)} bots\nShowing: {showing} bots"
             await ctx.send(msg)
 
@@ -1104,10 +1122,10 @@ async def cs_leave(
     ctx: commands.Context,
     guilds: str,
     reason: str,
-    user: discord.User | None = commands.parameter(default=None, description="Who to use for leaving. Defaults to author"),
+    user: discord.User | None = commands.parameter(default=None, description="The target who should be forced to leave"),
     ban_user: bool = False
 ):
-    """Leaves cache server(s). Use all to remove from all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
+    """Leaves cache server(s)"""
     try:
         usp = await get_user_staff_perms(bot.pool, ctx.author.id)
         resolved = usp.resolve()
@@ -1128,17 +1146,20 @@ async def cs_leave(
         except:
             usp_user = StaffPermissions(user_positions=[], perm_overrides=[])
 
-        lowest_index = 655356553565535
+        lowest_index = None
         for p in usp.user_positions:
-            if p.index < lowest_index:
+            if (lowest_index is None) or p.index < lowest_index:
                 lowest_index = p.index
         
-        lowest_index_user = 655356553565535
+        lowest_index_user = None
         for p in usp_user.user_positions:
-            if p.index < lowest_index_user:
+            if (lowest_index_user is None) or p.index < lowest_index_user:
                 lowest_index_user = p.index
         
-        if lowest_index_user <= lowest_index:
+        if lowest_index is None:
+            return await ctx.send("You have no permissions")
+
+        if (lowest_index_user is not None) and lowest_index_user <= lowest_index:
             return await ctx.send("You cannot remove someone with a lower or equal index (higher or equal in hierarchy) than you from cache servers")        
 
     resolved_guilds = await resolve_guilds_from_str(guilds, lambda g: g.me.guild_permissions.ban_members if ban_user else g.me.guild_permissions.kick_members)
@@ -1393,7 +1414,7 @@ async def cs_oauth_join(
     ctx: commands.Context,
     guilds: str
 ):
-    """Joins cache server(s) bypassing typical invite flow. Use all to add to all servers, cs to add to cache servers only or specify guild ids/names to add to specific servers."""
+    """Joins cache server(s) bypassing typical invite flow."""
     try:
         usp = await get_user_staff_perms(bot.pool, ctx.author.id)
         resolved = usp.resolve()
