@@ -92,6 +92,7 @@ class BorealisBot(commands.AutoShardedBot):
         server = uvicorn.Server(config=uvicorn.Config(api.app, workers=3, loop=loop, port=2837))
         asyncio.create_task(server.serve())
         await super().start(self.config.token)
+        await cache_server_bot.start(config.cache_server_maker.token)
 
 intents = discord.Intents.all()
 
@@ -105,6 +106,8 @@ bot_tasks = []
 async def on_ready():
     print(f"Logged in as {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
     if not have_started_events:
+        await bot.tree.sync()
+        
         bot_tasks.extend(
             [
                 validate_members,
@@ -120,9 +123,6 @@ async def on_ready():
         for t in bot_tasks:
             t.add_exception_type(Exception)
             t.start()
-
-        await cache_server_bot.start(config.cache_server_maker.token)
-        await bot.tree.sync()
 
 @tasks.loop(seconds=10)
 async def task_fail_check():
